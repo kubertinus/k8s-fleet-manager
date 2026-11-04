@@ -1,0 +1,57 @@
+{
+  "name": "k8s-fleet-manager",
+  "version": "0.11.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint . --ext .js,.jsx,.ts,.tsx",
+    "test": "vitest run",
+    "docker:build": "./build-dockerhub.sh",
+    "docker:push": "./push-dockerhub.sh",
+    "release:check": "./release-check.sh"
+  },
+  "dependencies": {
+    "@kubernetes/client-node": "^1.4.0",
+    "@radix-ui/react-dialog": "^1.0.5",
+    "@radix-ui/react-label": "^2.0.2",
+    "@radix-ui/react-slot": "^1.0.2",
+    "@radix-ui/react-toast": "^1.1.5",
+    "@types/node-fetch": "^2.6.13",
+    "autoprefixer": "^10.4.21",
+    "axios": "^1.6.2",
+    "bcryptjs": "^2.4.3",
+    "class-variance-authority": "^0.7.0",
+    "clsx": "^2.0.0",
+    "jsonwebtoken": "^9.0.2",
+    "lucide-react": "^0.292.0",
+    "next": "^15.5.12",
+    "next-auth": "^4.24.5",
+    "node-fetch": "^3.3.2",
+    "pg": "^8.11.3",
+    "react": "^18",
+    "react-dom": "^18",
+    "tailwind-merge": "^2.0.0",
+    "yaml": "^2.8.1"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/jsonwebtoken": "^9.0.5",
+    "@types/node": "^20",
+    "@types/pg": "^8.10.9",
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "baseline-browser-mapping": "^2.10.0",
+    "eslint": "^9.39.3",
+    "eslint-config-next": "^16.1.6",
+    "postcss": "^8",
+    "tailwindcss": "^3.3.0",
+    "typescript": "^5",
+    "vitest": "^3.2.7"
+  },
+  "overrides": {
+    "minimatch": "^10.2.2",
+    "sucrase": "^3.35.1"
+  }
+}

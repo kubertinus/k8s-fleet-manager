@@ -1,0 +1,12 @@
+{
+  "name": "antrea-flow-adapter",
+  "version": "0.1.1",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "ipfix_node": "^1.1.1"
+  },
+  "scripts": {
+    "start": "node server.js"
+  }
+}

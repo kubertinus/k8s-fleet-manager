@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: k8sfleet
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - k8s-fleet-manager-network
+
+  k8s-fleet-manager:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/k8sfleet
+      NEXTAUTH_SECRET: your-secret-change-in-production
+      NEXTAUTH_URL: http://localhost:3000
+      NODE_ENV: production
+      DISABLE_LOCAL_LOGIN: false
+    depends_on:
+      - postgres
+    networks:
+      - k8s-fleet-manager-network
+
+volumes:
+  postgres_data:
+
+networks:
+  k8s-fleet-manager-network:
+    driver: bridge

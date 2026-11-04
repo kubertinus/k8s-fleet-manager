@@ -1,0 +1,112 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: antrea-flow-adapter-config
+  namespace: k8s-fleet-manager
+data:
+  PORT: "8081"
+  HOST: "0.0.0.0"
+  REQUEST_TIMEOUT_MS: "8000"
+  IPFIX_PORT: "4739"
+  IPFIX_HOST: "0.0.0.0"
+  IPFIX_ENABLE_UDP: "true"
+  IPFIX_ENABLE_TCP: "true"
+  FLOW_TTL_MS: "86400000"
+  # IMPORTANT:
+  # This must point to an HTTP endpoint that can return flow records as JSON.
+  # A collector that only exposes UDP/TCP 4739 (raw IPFIX ingest) is NOT queryable by this adapter.
+  # Leave empty until you have a query service over stored flow data.
+  # Example when available:
+  # UPSTREAM_URL: "http://ipfix-query-service.ipfix.svc.cluster.local:8080/flows?clusterId={clusterId}&namespace={namespace}&window={window}"
+  UPSTREAM_URL: ""
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: antrea-flow-adapter-secret
+  namespace: k8s-fleet-manager
+type: Opaque
+stringData:
+  # Optional: protect adapter endpoint itself
+  ADAPTER_TOKEN: ""
+  # Optional: auth for upstream query endpoint
+  UPSTREAM_TOKEN: ""
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: antrea-flow-adapter
+  namespace: k8s-fleet-manager
+  labels:
+    app: antrea-flow-adapter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: antrea-flow-adapter
+  template:
+    metadata:
+      labels:
+        app: antrea-flow-adapter
+    spec:
+      containers:
+        - name: adapter
+          image: kubertinus/antrea-flow-adapter:0.1.1
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8081
+              name: http
+            - containerPort: 4739
+              name: ipfix-udp
+              protocol: UDP
+            - containerPort: 4739
+              name: ipfix-tcp
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: antrea-flow-adapter-config
+            - secretRef:  
+                name: antrea-flow-adapter-secret
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "250m"
+              memory: "256Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: antrea-flow-adapter
+  namespace: k8s-fleet-manager
+  labels:
+    app: antrea-flow-adapter
+spec:
+  selector:
+    app: antrea-flow-adapter
+  ports:
+    - name: http
+      port: 8081
+      targetPort: http
+      protocol: TCP
+    - name: ipfix-udp
+      port: 4739
+      targetPort: ipfix-udp
+      protocol: UDP
+    - name: ipfix-tcp
+      port: 4739
+      targetPort: ipfix-tcp
+      protocol: TCP

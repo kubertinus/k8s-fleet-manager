@@ -1,0 +1,23 @@
+# CA certificates the app should trust for internal HTTPS services such as
+# Keycloak or Nexus (an internal CA, or a missing intermediate certificate).
+# Optional: without this ConfigMap only the public CAs are trusted.
+# Node reads the file at startup, so restart the app after a change:
+#   kubectl -n k8s-fleet-manager rollout restart deployment/k8s-fleet-manager-app
+#
+# Create it from a PEM file (several certificates in one file are fine):
+#   kubectl -n k8s-fleet-manager create configmap k8s-fleet-manager-ca --from-file=ca.crt=./ca.crt
+#
+# With a cert-manager CA issuer, the CA is in the issuer's secret:
+#   kubectl -n cert-manager get secret <ca-secret> -o jsonpath='{.data.ca\.crt}' | base64 -d > ca.crt
+#
+# Or as a manifest (it has no .yaml extension, so `kubectl apply -f deploy/` skips it):
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: k8s-fleet-manager-ca
+  namespace: k8s-fleet-manager
+data:
+  ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    ...
+    -----END CERTIFICATE-----

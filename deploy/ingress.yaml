@@ -1,0 +1,26 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: k8s-fleet-manager-ingress
+  namespace: k8s-fleet-manager
+  annotations:
+    # No rewrite needed since the app expects the full path with basePath
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - k8s-fleet-manager.diersmann.com
+      secretName: k8s-fleet-manager-tls
+  rules:
+    - host: k8s-fleet-manager.diersmann.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: k8s-fleet-manager-app
+                port:
+                  number: 80

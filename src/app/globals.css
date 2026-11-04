@@ -1,0 +1,158 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Dark slate + orange palette, shared with talos-config-manager. */
+@layer base {
+  :root {
+    --background: 229 84% 5%;          /* slate-950 */
+    --foreground: 214 32% 91%;         /* slate-200 */
+    --card: 222 47% 11%;               /* slate-900 */
+    --card-foreground: 214 32% 91%;
+    --popover: 222 47% 11%;
+    --popover-foreground: 214 32% 91%;
+    --primary: 21 90% 48%;             /* orange-600 */
+    --primary-foreground: 0 0% 100%;
+    --secondary: 217 33% 17%;          /* slate-800 */
+    --secondary-foreground: 214 32% 91%;
+    --muted: 217 33% 17%;
+    --muted-foreground: 215 20% 65%;   /* slate-400 */
+    --accent: 217 33% 17%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 350 89% 60%;        /* rose-500 */
+    --destructive-foreground: 0 0% 100%;
+    --border: 217 33% 17%;
+    --input: 215 25% 27%;              /* slate-700 */
+    --ring: 21 90% 48%;
+    --radius: 0.5rem;
+  }
+
+  html {
+    color-scheme: dark;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-slate-950 text-slate-200 antialiased;
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-xl border border-slate-800 bg-slate-900/70;
+  }
+
+  .btn-primary,
+  .btn-secondary,
+  .btn-ghost {
+    @apply inline-flex items-center gap-2 whitespace-nowrap rounded-lg px-3.5 py-1.5 text-sm font-medium transition-colors disabled:cursor-progress disabled:opacity-60;
+  }
+  .btn-primary {
+    @apply bg-orange-600 text-white hover:bg-orange-500;
+  }
+  .btn-secondary {
+    @apply bg-slate-800 text-slate-200 hover:bg-slate-700;
+  }
+  .btn-ghost {
+    @apply text-slate-400 hover:bg-slate-800 hover:text-white;
+  }
+
+  .input {
+    @apply w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white placeholder:text-slate-500 focus:border-transparent focus:outline-none focus:ring-2 focus:ring-orange-600/60;
+  }
+
+  .badge {
+    @apply inline-flex items-center whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-medium leading-4;
+  }
+  .badge-ok {
+    @apply bg-emerald-500/15 text-emerald-300;
+  }
+  .badge-warn {
+    @apply bg-amber-500/15 text-amber-300;
+  }
+  .badge-err {
+    @apply bg-rose-500/15 text-rose-300;
+  }
+  .badge-info {
+    @apply bg-sky-500/15 text-sky-300;
+  }
+  .badge-muted {
+    @apply bg-slate-500/20 text-slate-300;
+  }
+
+  .side-link {
+    @apply flex w-full items-center gap-2.5 rounded-md px-3 py-1.5 text-slate-400 transition-colors hover:bg-slate-800 hover:text-white;
+  }
+  .side-link.active {
+    @apply bg-slate-800 text-white;
+  }
+
+  .status-dot {
+    @apply inline-block h-2 w-2 flex-shrink-0 rounded-full;
+  }
+  .status-dot-ok {
+    @apply bg-emerald-500;
+  }
+  .status-dot-warn {
+    @apply bg-amber-500;
+  }
+  .status-dot-err {
+    @apply bg-rose-500;
+  }
+  .status-dot-info {
+    @apply animate-pulse bg-sky-400;
+  }
+  .status-dot-muted {
+    @apply bg-slate-500;
+  }
+
+  /* Coloured top edge on cluster cards, like the talos-config-manager overview. */
+  .tone-top {
+    @apply border-t-[3px];
+  }
+  .tone-top-ok {
+    @apply border-t-emerald-500;
+  }
+  .tone-top-warn {
+    @apply border-t-amber-500;
+  }
+  .tone-top-err {
+    @apply border-t-rose-500;
+  }
+  .tone-top-info {
+    @apply border-t-sky-500;
+  }
+  .tone-top-muted {
+    @apply border-t-slate-600;
+  }
+
+  .node-dot {
+    @apply h-3.5 w-3.5 rounded-[4px] transition-transform hover:scale-125;
+  }
+
+  .meter {
+    @apply h-1.5 overflow-hidden rounded-full bg-slate-800;
+  }
+  .meter > span {
+    @apply block h-full rounded-full;
+  }
+}
+
+.status-healthy {
+  @apply border-emerald-500/30 bg-emerald-500/15 text-emerald-300;
+}
+
+.status-unhealthy {
+  @apply border-rose-500/30 bg-rose-500/15 text-rose-300;
+}
+
+.status-warning {
+  @apply border-amber-500/30 bg-amber-500/15 text-amber-300;
+}
+
+.status-unknown {
+  @apply border-slate-500/30 bg-slate-500/20 text-slate-300;
+}

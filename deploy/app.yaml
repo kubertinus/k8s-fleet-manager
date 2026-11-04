@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k8s-fleet-manager-app
+  namespace: k8s-fleet-manager
+  labels:
+    app: k8s-fleet-manager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: k8s-fleet-manager
+  template:
+    metadata:
+      labels:
+        app: k8s-fleet-manager
+    spec:
+      # The app reaches every cluster through the kubeconfigs stored in its
+      # settings, never through its own ServiceAccount: don't mount a token.
+      automountServiceAccountToken: false
+      containers:
+      - name: k8s-fleet-manager
+        image: kubertinus/k8s-fleet-manager:0.11.0
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 3000
+        env:
+        # Created by CloudNativePG for the k8s-fleet-manager-postgres cluster (database.yaml)
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: k8s-fleet-manager-postgres-app
+              key: uri
+        # Create once, see secrets.example: signs the login tokens
+        - name: NEXTAUTH_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: k8s-fleet-manager-secrets
+              key: NEXTAUTH_SECRET
+        - name: NEXTAUTH_URL
+          value: "https://k8s-fleet-manager.diersmann.com"
+        - name: NODE_ENV
+          value: "production"
+        - name: DISABLE_LOCAL_LOGIN
+          value: "true"
+        # Extra CA for internal HTTPS services (Keycloak, Nexus), from the optional
+        # ConfigMap k8s-fleet-manager-ca (see ca-configmap.example). Without it Node
+        # logs a warning and uses the public CAs only.
+        - name: NODE_EXTRA_CA_CERTS
+          value: /etc/k8s-fleet-manager/ca/ca.crt
+        volumeMounts:
+        - name: extra-ca
+          mountPath: /etc/k8s-fleet-manager/ca
+          readOnly: true
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 3000
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+      volumes:
+      - name: extra-ca
+        configMap:
+          name: k8s-fleet-manager-ca
+          optional: true

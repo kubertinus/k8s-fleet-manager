@@ -1,0 +1,21 @@
+# PostgreSQL via CloudNativePG. The operator creates the Secret k8s-fleet-manager-postgres-app
+# (keys: username, password, uri, ...) that the app reads its connection from.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: k8s-fleet-manager-postgres
+  namespace: k8s-fleet-manager
+spec:
+  instances: 3
+  imageName: ghcr.io/cloudnative-pg/postgresql:17.6
+  enableSuperuserAccess: true
+  bootstrap:
+    initdb:
+      database: k8sfleet
+      owner: k8sfleet
+  managed:
+    services:
+      # The app only needs the read-write service (k8s-fleet-manager-postgres-rw)
+      disabledDefaultServices: ["ro", "r"]
+  storage:
+    size: 1Gi
