@@ -615,6 +615,22 @@ async function runAllMigrations() {
     `, ['keycloak_allow_insecure_tls', 'false', 'Accept an untrusted TLS certificate from Keycloak (prefer trusting the CA via NODE_EXTRA_CA_CERTS)'])
   })
 
+  // Migration 19: Trivy severity and counts from the Harbor scan overview
+  await runMigration('add_image_cve_summary', async () => {
+    await pool.query(`
+      ALTER TABLE image_versions
+        ADD COLUMN IF NOT EXISTS cve_severity VARCHAR(20),
+        ADD COLUMN IF NOT EXISTS cve_critical INTEGER,
+        ADD COLUMN IF NOT EXISTS cve_high INTEGER,
+        ADD COLUMN IF NOT EXISTS cve_medium INTEGER,
+        ADD COLUMN IF NOT EXISTS cve_low INTEGER,
+        ADD COLUMN IF NOT EXISTS cve_total INTEGER,
+        ADD COLUMN IF NOT EXISTS cve_fixable INTEGER,
+        ADD COLUMN IF NOT EXISTS cve_scanned_at TIMESTAMP WITH TIME ZONE,
+        ADD COLUMN IF NOT EXISTS cve_error TEXT
+    `)
+  })
+
   // Future migrations can be added here
   // await runMigration('migration_name', async () => { ... })
 }

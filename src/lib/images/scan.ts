@@ -1,5 +1,6 @@
 import type { PoolClient } from 'pg'
 import { getPool, initializeDatabase } from '@/lib/database'
+import { fetchHarborScan, loadHarborSettings, resolveHarborTarget, type CveSummary } from './harbor'
 import { collectWorkloadImages, type WorkloadImage } from './inventory'
 import { parseImageReference, type ImageReference } from './reference'
 import { listTags, publicEndpoint, RegistryError, type RegistryEndpoint } from './registry'
@@ -8,6 +9,7 @@ import { findNewerVersion, isVersionTag, type UpdateType } from './versions'
 // Image report scan: collects all workload images of every active cluster and
 // checks each unique image for a newer version, on Nexus when configured and
 // otherwise (or when Nexus doesn't know the image) on the image's own registry.
+// When Harbor is enabled, the same pass stores the Trivy severity Harbor already has.
 
 export type ImageStatus = 'update' | 'current' | 'unversioned' | 'pinned' | 'error'
 
@@ -20,6 +22,10 @@ export interface ImageVersionResult extends ImageReference {
   error?: string
   // The error looked temporary (timeout, rate limit, 5xx): try again later in the scan
   retryable?: boolean
+  // Set only when Harbor was consulted. Absent means the stored CVE columns stay as they are.
+  cveChecked?: boolean
+  cve?: CveSummary | null
+  cveError?: string
 }
 
 // Arbitrary, fixed key for pg_try_advisory_lock so only one full scan runs at a time,
@@ -140,7 +146,44 @@ async function saveVersions(results: ImageVersionResult[]) {
          source = EXCLUDED.source, error = EXCLUDED.error, checked_at = EXCLUDED.checked_at`,
       [r.image, r.registry, r.repository, r.tag ?? null, r.digest ?? null, r.status, r.latestVersion ?? null, r.updateType ?? null, r.latestInMajor ?? null, r.source ?? null, r.error ?? null]
     )
+    if (!r.cveChecked) continue
+    const cve = r.cveError ? null : r.cve
+    await pool.query(
+      `UPDATE image_versions SET
+         cve_severity = $2, cve_critical = $3, cve_high = $4, cve_medium = $5, cve_low = $6,
+         cve_total = $7, cve_fixable = $8, cve_scanned_at = $9, cve_error = $10
+       WHERE image = $1`,
+      [r.image, cve?.severity ?? null, cve?.critical ?? null, cve?.high ?? null, cve?.medium ?? null, cve?.low ?? null, cve?.total ?? null, cve?.fixable ?? null, cve?.scannedAt ?? null, r.cveError ?? null]
+    )
   }
+}
+
+// Harbor failures stay on the CVE columns. They do not change the version status.
+async function attachCve(results: ImageVersionResult[]) {
+  const settings = await loadHarborSettings()
+  if (!settings) {
+    console.log('[image-scan] harbor disabled, skipping cve')
+    return
+  }
+  let scanned = 0
+  let missing = 0
+  let failed = 0
+  await runPool(results, VERSION_CONCURRENCY, async result => {
+    result.cveChecked = true
+    const target = resolveHarborTarget(result, settings)
+    if (!target) {
+      result.cve = null
+      missing++
+      return
+    }
+    const { summary, error } = await fetchHarborScan(settings, target)
+    result.cve = summary
+    result.cveError = error
+    if (error) failed++
+    else if (summary) scanned++
+    else missing++
+  })
+  console.log(`[image-scan] harbor cve: ${scanned} scanned, ${missing} without a report, ${failed} failed`)
 }
 
 async function checkImages(images: string[]): Promise<ImageVersionResult[]> {
@@ -162,6 +205,7 @@ async function checkImages(images: string[]): Promise<ImageVersionResult[]> {
     console.log(`[image-scan] retried ${failed.length} failed image(s), ${recovered} recovered`)
   }
 
+  await attachCve(results)
   await saveVersions(results)
   return results
 }

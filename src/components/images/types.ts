@@ -1,5 +1,6 @@
 export type ImageStatus = 'update' | 'current' | 'unversioned' | 'pinned' | 'error' | 'pending'
 export type UpdateType = 'major' | 'minor' | 'patch'
+export type CveSeverity = 'None' | 'Unknown' | 'Low' | 'Medium' | 'High' | 'Critical'
 
 export interface ImageUsage {
   clusterId: number
@@ -26,6 +27,15 @@ export interface ReportImage {
   source: 'nexus' | 'online' | null
   error: string | null
   checkedAt: string | null
+  cveSeverity: CveSeverity | null
+  cveCritical: number | null
+  cveHigh: number | null
+  cveMedium: number | null
+  cveLow: number | null
+  cveTotal: number | null
+  cveFixable: number | null
+  cveScannedAt: string | null
+  cveError: string | null
   usages: ImageUsage[]
 }
 
@@ -87,6 +97,20 @@ export function matchesStatus(image: ReportImage, filter: StatusFilter) {
     default:
       return true
   }
+}
+
+// "2C · 5H": only the severities that actually occur.
+export function cveCountLabel(image: Pick<ReportImage, 'cveCritical' | 'cveHigh' | 'cveMedium' | 'cveLow'>) {
+  const parts: [number | null, string][] = [
+    [image.cveCritical, 'C'],
+    [image.cveHigh, 'H'],
+    [image.cveMedium, 'M'],
+    [image.cveLow, 'L'],
+  ]
+  return parts
+    .filter((part): part is [number, string] => typeof part[0] === 'number' && part[0] > 0)
+    .map(([count, letter]) => `${count}${letter}`)
+    .join(' · ')
 }
 
 export function relativeTime(iso: string | null | undefined) {

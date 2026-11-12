@@ -4,7 +4,7 @@ import { Fragment, useState } from 'react'
 import { ArrowRight, ChevronDown, ChevronRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import ImageStatusBadge from './ImageStatusBadge'
-import { relativeTime, type ImageUsage, type ReportImage } from './types'
+import { cveCountLabel, formatDateTime, relativeTime, type ImageUsage, type ReportImage } from './types'
 
 export interface ImageRow {
   image: ReportImage
@@ -22,6 +22,35 @@ export function CurrentVersion({ image }: { image: ReportImage }) {
   return (
     <span className="font-mono text-xs text-slate-400" title={image.digest ?? undefined}>
       {image.digest?.slice(0, 19)}…
+    </span>
+  )
+}
+
+const cveBadge: Record<string, string> = {
+  Critical: 'badge-err',
+  High: 'bg-orange-500/15 text-orange-300',
+  Medium: 'badge-warn',
+  Low: 'badge-muted',
+  None: 'badge-ok',
+  Unknown: 'badge-muted',
+}
+
+export function CveScore({ image }: { image: ReportImage }) {
+  if (image.cveError) {
+    return (
+      <span className="badge badge-err" title={image.cveError}>
+        CVE failed
+      </span>
+    )
+  }
+  if (!image.cveSeverity) return <span className="text-slate-600">—</span>
+  const counts = cveCountLabel(image)
+  const scanned = image.cveScannedAt ? `scanned ${formatDateTime(image.cveScannedAt)}` : null
+  const tip = [`${image.cveTotal ?? 0} vulnerabilities, ${image.cveFixable ?? 0} fixable`, scanned].filter(Boolean).join(' · ')
+  return (
+    <span className="inline-flex items-center gap-1.5" title={tip}>
+      <span className={cn('badge', cveBadge[image.cveSeverity] ?? 'badge-muted')}>{image.cveSeverity}</span>
+      {counts && <span className="whitespace-nowrap font-mono text-[11px] text-slate-400">{counts}</span>}
     </span>
   )
 }
@@ -96,7 +125,7 @@ export default function ImageTable({
 
   return (
     <div className="card overflow-x-auto">
-      <table className="w-full min-w-[860px] text-sm">
+      <table className="w-full min-w-[980px] text-sm">
         <thead>
           <tr className="border-b border-slate-800 text-left text-[11px] uppercase tracking-wider text-slate-500">
             <th className="w-10 px-4 py-2.5">
@@ -106,6 +135,7 @@ export default function ImageTable({
             <th className="px-3 py-2.5 font-medium">Current</th>
             <th className="px-3 py-2.5 font-medium">Available</th>
             <th className="px-3 py-2.5 font-medium">Status</th>
+            <th className="px-3 py-2.5 font-medium">CVE</th>
             <th className="px-3 py-2.5 font-medium">Source</th>
             <th className="px-3 py-2.5 font-medium">Used by</th>
             <th className="px-4 py-2.5 text-right font-medium">Checked</th>
@@ -140,6 +170,9 @@ export default function ImageTable({
                   <td className="px-3 py-2.5">
                     <ImageStatusBadge image={image} />
                   </td>
+                  <td className="px-3 py-2.5">
+                    <CveScore image={image} />
+                  </td>
                   <td className="px-3 py-2.5 text-xs text-slate-400">{image.source === 'nexus' ? 'Nexus' : image.source === 'online' ? 'Online' : '—'}</td>
                   <td className="whitespace-nowrap px-3 py-2.5 text-xs text-slate-300" title={Array.from(new Set(usages.map(u => u.clusterName))).join(', ')}>
                     {usageSummary(usages)}
@@ -151,8 +184,9 @@ export default function ImageTable({
                 {isOpen && (
                   <tr className="bg-slate-950/50">
                     <td />
-                    <td colSpan={7} className="px-3 pb-3 pt-1">
+                    <td colSpan={8} className="px-3 pb-3 pt-1">
                       {image.error && <p className="mb-2 text-xs text-rose-300">Check failed: {image.error}</p>}
+                      {image.cveError && <p className="mb-2 text-xs text-rose-300">CVE check failed: {image.cveError}</p>}
                       <p className="mb-2 break-all font-mono text-[11px] text-slate-500">{image.image}</p>
                       <table className="w-full text-xs">
                         <thead>

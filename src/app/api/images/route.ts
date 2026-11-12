@@ -64,6 +64,15 @@ export async function GET(request: NextRequest) {
           source: v?.source ?? null,
           error: v?.error ?? null,
           checkedAt: v?.checked_at ?? null,
+          cveSeverity: v?.cve_severity ?? null,
+          cveCritical: v?.cve_critical ?? null,
+          cveHigh: v?.cve_high ?? null,
+          cveMedium: v?.cve_medium ?? null,
+          cveLow: v?.cve_low ?? null,
+          cveTotal: v?.cve_total ?? null,
+          cveFixable: v?.cve_fixable ?? null,
+          cveScannedAt: v?.cve_scanned_at ?? null,
+          cveError: v?.cve_error ?? null,
           usages: [],
         }
         images.set(row.image, entry)
