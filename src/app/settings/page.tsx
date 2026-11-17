@@ -105,7 +105,8 @@ export default function SettingsPage() {
     harbor_password: '',
     harbor_project: 'proxy-cache',
     harbor_mirror_source_project: 'directpull',
-    harbor_mirror_target_project: 'managed_nexus'
+    harbor_mirror_target_project: 'managed_nexus',
+    harbor_allow_insecure_tls: 'false'
   })
 
   // Health history settings state
@@ -1495,6 +1496,23 @@ export default function SettingsPage() {
                       placeholder="••••••••"
                     />
                   </div>
+                </div>
+
+                <div>
+                  <label className="flex items-center gap-2 text-sm font-medium text-gray-700">
+                    <input
+                      type="checkbox"
+                      checked={harborSettings.harbor_allow_insecure_tls === 'true'}
+                      onChange={(e) => setHarborSettings({
+                        ...harborSettings,
+                        harbor_allow_insecure_tls: e.target.checked ? 'true' : 'false'
+                      })}
+                    />
+                    Allow insecure TLS for Harbor
+                  </label>
+                  <p className="text-xs text-gray-500 mt-1">
+                    Use only for a self-signed or untrusted Harbor certificate. Applies to CVE lookup and Pull to Harbor.
+                  </p>
                 </div>
 
                 <div>

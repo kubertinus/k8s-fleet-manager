@@ -1,3 +1,5 @@
+import http from 'http'
+import https from 'https'
 import { getPool } from '@/lib/database'
 import type { ImageReference } from './reference'
 import { fetchManifest, type RegistryEndpoint } from './registry'
@@ -27,6 +29,7 @@ export interface HarborSettings {
   username?: string
   password?: string
   project: string
+  insecureTls?: boolean
 }
 
 export interface HarborTarget {
@@ -104,9 +107,30 @@ export function parseScanOverview(artifact: any): CveSummary | null {
   }
 }
 
+// global fetch() cannot skip certificate checks, so Harbor calls go through node:https.
+function harborRequest(url: string, { method = 'GET', headers = {}, insecureTls = false, timeoutMs = REQUEST_TIMEOUT_MS }: { method?: string; headers?: Record<string, string>; insecureTls?: boolean; timeoutMs?: number } = {}): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const target = new URL(url)
+    const lib = target.protocol === 'http:' ? http : https
+    const req = lib.request(
+      target,
+      { method, headers, rejectUnauthorized: !insecureTls, timeout: timeoutMs },
+      res => {
+        let body = ''
+        res.setEncoding('utf8')
+        res.on('data', chunk => (body += chunk))
+        res.on('end', () => resolve({ status: res.statusCode || 0, body }))
+      }
+    )
+    req.on('timeout', () => req.destroy(Object.assign(new Error('Harbor request timed out'), { name: 'TimeoutError' })))
+    req.on('error', reject)
+    req.end()
+  })
+}
+
 export async function loadHarborSettings(): Promise<HarborSettings | null> {
   const result = await getPool().query('SELECT key, value FROM settings WHERE key = ANY($1)', [
-    ['harbor_enabled', 'harbor_url', 'harbor_username', 'harbor_password', 'harbor_project'],
+    ['harbor_enabled', 'harbor_url', 'harbor_username', 'harbor_password', 'harbor_project', 'harbor_allow_insecure_tls'],
   ])
   const settings = Object.fromEntries(result.rows.map((row: any) => [row.key, row.value]))
   if (settings.harbor_enabled !== 'true') return null
@@ -117,6 +141,7 @@ export async function loadHarborSettings(): Promise<HarborSettings | null> {
     username: (settings.harbor_username || '').trim() || undefined,
     password: settings.harbor_password || undefined,
     project: (settings.harbor_project || '').trim(),
+    insecureTls: settings.harbor_allow_insecure_tls === 'true',
   }
 }
 
@@ -152,6 +177,7 @@ export interface HarborMirrorSettings {
   password: string
   sourceProject: string
   targetProject: string
+  insecureTls: boolean
 }
 
 // Repository in the path is double-encoded; `from` is a query value, so once.
@@ -163,7 +189,7 @@ export function harborCopyUrl(settings: { url: string }, targetProject: string, 
 
 export async function loadHarborMirrorSettings(): Promise<HarborMirrorSettings> {
   const result = await getPool().query('SELECT key, value FROM settings WHERE key = ANY($1)', [
-    ['harbor_url', 'harbor_username', 'harbor_password', 'harbor_mirror_source_project', 'harbor_mirror_target_project'],
+    ['harbor_url', 'harbor_username', 'harbor_password', 'harbor_mirror_source_project', 'harbor_mirror_target_project', 'harbor_allow_insecure_tls'],
   ])
   const settings = Object.fromEntries(result.rows.map((row: any) => [row.key, row.value]))
   const url = harborHost(settings.harbor_url || '')
@@ -178,6 +204,7 @@ export async function loadHarborMirrorSettings(): Promise<HarborMirrorSettings> 
     password,
     sourceProject: (settings.harbor_mirror_source_project || 'directpull').trim() || 'directpull',
     targetProject: (settings.harbor_mirror_target_project || 'managed_nexus').trim() || 'managed_nexus',
+    insecureTls: settings.harbor_allow_insecure_tls === 'true',
   }
 }
 
@@ -204,24 +231,25 @@ export async function mirrorImage(settings: HarborMirrorSettings, image: string)
     baseUrl: `https://${harborHost(settings.url)}`,
     username: settings.username,
     password: settings.password,
+    insecureTls: settings.insecureTls,
   }
   const sourceName = `${settings.sourceProject}/${parts.repository}`
   await fetchManifest(endpoint, sourceName, parts.tag)
 
   const from = `${settings.sourceProject}/${path}`
-  const response = await fetch(harborCopyUrl(settings, settings.targetProject, parts.repository, from), {
+  const response = await harborRequest(harborCopyUrl(settings, settings.targetProject, parts.repository, from), {
     method: 'POST',
     headers: {
       Accept: 'application/json',
       Authorization: `Basic ${Buffer.from(`${settings.username}:${settings.password}`).toString('base64')}`,
     },
-    signal: AbortSignal.timeout(60_000),
+    insecureTls: settings.insecureTls,
+    timeoutMs: 60_000,
   })
   // 409: the tag is already in the target project
   if (response.status !== 200 && response.status !== 201 && response.status !== 409) {
-    throw new Error(copyFailure(response.status, await response.text().catch(() => '')))
+    throw new Error(copyFailure(response.status, response.body))
   }
-  await response.arrayBuffer().catch(() => {})
   return { target: `${harborHost(settings.url)}/${settings.targetProject}/${path}` }
 }
 
@@ -231,13 +259,13 @@ export async function fetchHarborScan(settings: HarborSettings, target: HarborTa
     headers.Authorization = `Basic ${Buffer.from(`${settings.username}:${settings.password}`).toString('base64')}`
   }
   try {
-    const response = await fetch(harborArtifactUrl(settings, target), { headers, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) })
+    const response = await harborRequest(harborArtifactUrl(settings, target), { headers, insecureTls: settings.insecureTls })
     if (response.status === 404) return { summary: null }
-    if (!response.ok) {
+    if (response.status < 200 || response.status >= 300) {
       if (response.status === 401 || response.status === 403) return { summary: null, error: 'Harbor authentication failed' }
       return { summary: null, error: `Harbor responded ${response.status}` }
     }
-    return { summary: parseScanOverview(await response.json()) }
+    return { summary: parseScanOverview(JSON.parse(response.body)) }
   } catch (error: any) {
     const message = error?.name === 'TimeoutError' || error?.name === 'AbortError' ? 'Harbor request timed out' : error?.message || 'Harbor request failed'
     return { summary: null, error: message }

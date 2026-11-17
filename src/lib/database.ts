@@ -653,6 +653,14 @@ async function runAllMigrations() {
     }
   })
 
+  // Migration 21: Accept an untrusted certificate from Harbor
+  await runMigration('add_harbor_tls_setting', async () => {
+    await pool.query(
+      `INSERT INTO settings (key, value, description) VALUES ($1, $2, $3) ON CONFLICT (key) DO NOTHING`,
+      ['harbor_allow_insecure_tls', 'false', 'Accept an untrusted TLS certificate from Harbor (prefer trusting the CA via NODE_EXTRA_CA_CERTS)']
+    )
+  })
+
   // Future migrations can be added here
   // await runMigration('migration_name', async () => { ... })
 }
