@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { harborArtifactUrl, parseScanOverview, resolveHarborTarget, type HarborSettings } from '@/lib/images/harbor'
+import { harborArtifactUrl, harborCopyUrl, normalizeMirrorPath, parseScanOverview, resolveHarborTarget, type HarborSettings } from '@/lib/images/harbor'
 import { parseImageReference } from '@/lib/images/reference'
 
 const harbor: HarborSettings = {
@@ -42,6 +42,29 @@ describe('harborArtifactUrl', () => {
     const url = harborArtifactUrl(harbor, { project: 'proxy-cache', repository: 'library/nginx', reference: 'sha256:abc' })
     expect(url).toBe(
       'https://harbor.example.com/api/v2.0/projects/proxy-cache/repositories/library%252Fnginx/artifacts/sha256%3Aabc?with_scan_overview=true'
+    )
+  })
+})
+
+describe('normalizeMirrorPath', () => {
+  it('strips a registry host and keeps the repository and tag', () => {
+    expect(normalizeMirrorPath('docker.io/library/nginx:1.27')).toBe('library/nginx:1.27')
+    expect(normalizeMirrorPath('registry.k8s.io/etcd:v3.6.12')).toBe('etcd:v3.6.12')
+    expect(normalizeMirrorPath('ghcr.io/siderolabs/talos:v1.13.8')).toBe('siderolabs/talos:v1.13.8')
+    expect(normalizeMirrorPath('kubertinus/kubertinus:12.3')).toBe('kubertinus/kubertinus:12.3')
+  })
+
+  it('rejects a reference without a tag', () => {
+    expect(normalizeMirrorPath('library/nginx')).toBeNull()
+    expect(normalizeMirrorPath('nginx:')).toBeNull()
+  })
+})
+
+describe('harborCopyUrl', () => {
+  it('double-encodes the repository and encodes the source once', () => {
+    const url = harborCopyUrl(harbor, 'managed_nexus', 'library/nginx', 'directpull/library/nginx:1.27')
+    expect(url).toBe(
+      'https://harbor.example.com/api/v2.0/projects/managed_nexus/repositories/library%252Fnginx/artifacts?from=directpull%2Flibrary%2Fnginx%3A1.27'
     )
   })
 })

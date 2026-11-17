@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { AlertTriangle, CalendarClock, Layers, Loader2, Package, RotateCw, ScanSearch, Search } from 'lucide-react'
+import { AlertTriangle, CalendarClock, Download, Layers, Loader2, Package, RotateCw, ScanSearch, Search } from 'lucide-react'
 import AppShell from '@/components/layout/AppShell'
 import ImageTable, { type ImageRow } from '@/components/images/ImageTable'
 import WorkloadTable, { type WorkloadRow } from '@/components/images/WorkloadTable'
@@ -55,6 +55,7 @@ export default function ImagesPage() {
   const [notice, setNotice] = useState<string | null>(null)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [rechecking, setRechecking] = useState(false)
+  const [mirroring, setMirroring] = useState(false)
   const [starting, setStarting] = useState(false)
   const [showSchedule, setShowSchedule] = useState(false)
 
@@ -142,6 +143,35 @@ export default function ImagesPage() {
       setError(err.message)
     } finally {
       setRechecking(false)
+    }
+  }
+
+  const selectedUpdates = useMemo(
+    () => (data?.images ?? []).filter(image => selected.has(image.image) && image.status === 'update' && image.latestVersion),
+    [data, selected]
+  )
+
+  const mirror = async () => {
+    setMirroring(true)
+    setNotice(null)
+    setError(null)
+    try {
+      const response = await fetch('/api/images/mirror', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ images: selectedUpdates.map(image => image.image) }),
+      })
+      const body = await response.json()
+      if (!response.ok) throw new Error(body.error || 'Pull to Harbor failed')
+      const failed = (body.failed ?? []) as { image: string; error: string }[]
+      const mirrored = body.mirrored ?? 0
+      const summary = `Pulled ${mirrored} image${mirrored === 1 ? '' : 's'} to Harbor.`
+      setNotice(failed.length ? `${summary} ${failed.length} failed: ${failed.map(item => `${item.image} (${item.error})`).join('; ')}` : summary)
+      if (!failed.length) setSelected(new Set())
+    } catch (err: any) {
+      setError(err.message)
+    } finally {
+      setMirroring(false)
     }
   }
 
@@ -261,8 +291,14 @@ export default function ImagesPage() {
       }
       actions={
         <>
+          {selectedUpdates.length > 0 && (
+            <button onClick={mirror} disabled={mirroring || rechecking} className="btn-secondary">
+              {mirroring ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+              <span className="hidden sm:inline">{mirroring ? 'Pulling…' : `Pull ${selectedUpdates.length} to Harbor`}</span>
+            </button>
+          )}
           {selected.size > 0 && (
-            <button onClick={recheck} disabled={rechecking} className="btn-secondary">
+            <button onClick={recheck} disabled={rechecking || mirroring} className="btn-secondary">
               <RotateCw className={cn('h-4 w-4', rechecking && 'animate-spin')} />
               <span className="hidden sm:inline">{rechecking ? 'Checking…' : `Re-check ${selected.size} selected`}</span>
             </button>

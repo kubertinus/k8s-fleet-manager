@@ -38,18 +38,18 @@ interface RawResponse {
   body: string
 }
 
-function request(url: string, headers: Record<string, string>, insecureTls = false): Promise<RawResponse> {
+function request(url: string, headers: Record<string, string>, insecureTls = false, timeoutMs = REQUEST_TIMEOUT_MS): Promise<RawResponse> {
   return new Promise((resolve, reject) => {
     const target = new URL(url)
     const lib = target.protocol === 'http:' ? http : https
     const req = lib.request(
       target,
-      { method: 'GET', headers: { 'User-Agent': 'k8s-fleet-manager', ...headers }, rejectUnauthorized: !insecureTls, timeout: REQUEST_TIMEOUT_MS },
+      { method: 'GET', headers: { 'User-Agent': 'k8s-fleet-manager', ...headers }, rejectUnauthorized: !insecureTls, timeout: timeoutMs },
       res => {
         // Follow redirects (some registries redirect token or tag requests)
         if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
           res.resume()
-          request(new URL(res.headers.location, target).toString(), headers, insecureTls).then(resolve, reject)
+          request(new URL(res.headers.location, target).toString(), headers, insecureTls, timeoutMs).then(resolve, reject)
           return
         }
         let body = ''
@@ -58,7 +58,7 @@ function request(url: string, headers: Record<string, string>, insecureTls = fal
         res.on('end', () => resolve({ status: res.statusCode || 0, headers: res.headers, body }))
       }
     )
-    req.on('timeout', () => req.destroy(new RegistryError(`Timeout after ${REQUEST_TIMEOUT_MS / 1000}s`, undefined, true)))
+    req.on('timeout', () => req.destroy(new RegistryError(`Timeout after ${timeoutMs / 1000}s`, undefined, true)))
     req.on('error', reject)
     req.end()
   })
@@ -75,10 +75,10 @@ function retryDelay(attempt: number, retryAfter?: string | string[]) {
 
 // request() with retries for transient failures. Permanent answers (404, 401, ...)
 // and unknown hosts come back at once.
-async function requestWithRetry(url: string, headers: Record<string, string>, insecureTls: boolean | undefined, retries: number): Promise<RawResponse> {
+async function requestWithRetry(url: string, headers: Record<string, string>, insecureTls: boolean | undefined, retries: number, timeoutMs = REQUEST_TIMEOUT_MS): Promise<RawResponse> {
   for (let attempt = 0; ; attempt++) {
     try {
-      const res = await request(url, headers, insecureTls)
+      const res = await request(url, headers, insecureTls, timeoutMs)
       if (!RETRY_STATUS.has(res.status) || attempt >= retries) return res
       await retryTiming.sleep(retryDelay(attempt, res.headers['retry-after']))
     } catch (error: any) {
@@ -205,6 +205,49 @@ export async function listTags(endpoint: RegistryEndpoint, repository: string, {
   }
 
   return tags
+}
+
+const MANIFEST_ACCEPT = [
+  'application/vnd.docker.distribution.manifest.list.v2+json',
+  'application/vnd.oci.image.index.v1+json',
+  'application/vnd.docker.distribution.manifest.v2+json',
+  'application/vnd.oci.image.manifest.v1+json',
+  'application/vnd.docker.distribution.manifest.v1+prettyjws',
+].join(', ')
+
+// GET the manifest. A proxy-cache project (Harbor directpull) fetches the image from
+// upstream while answering, so this is the pull. Throws RegistryError.
+export async function fetchManifest(
+  endpoint: RegistryEndpoint,
+  repository: string,
+  reference: string,
+  { timeoutMs = 180_000, retries = 0 }: { timeoutMs?: number; retries?: number } = {}
+): Promise<void> {
+  const base = endpoint.baseUrl.replace(/\/$/, '')
+  const name = repository.split('/').map(part => encodeURIComponent(part)).join('/')
+  const url = `${base}/v2/${name}/manifests/${encodeURIComponent(reference)}`
+  const headers: Record<string, string> = { Accept: MANIFEST_ACCEPT }
+  let authorization = basicAuth(endpoint)
+  if (authorization) headers.Authorization = authorization
+
+  let res: RawResponse
+  try {
+    res = await requestWithRetry(url, headers, endpoint.insecureTls, retries, timeoutMs)
+    if (res.status === 401) {
+      const challenge = parseChallenge(res.headers['www-authenticate'] as string | undefined)
+      if (challenge?.scheme === 'bearer' && challenge.params.realm) {
+        authorization = `Bearer ${await bearerToken(endpoint, challenge.params, repository, retries)}`
+        res = await requestWithRetry(url, { ...headers, Authorization: authorization }, endpoint.insecureTls, retries, timeoutMs)
+      }
+    }
+  } catch (error) {
+    throw describeNetworkError(error, url)
+  }
+
+  const where = `${repository}:${reference}`
+  if (res.status === 404) throw new RegistryError(`Not found: ${where}`, 404)
+  if (res.status === 401 || res.status === 403) throw new RegistryError(`Access denied (HTTP ${res.status}) for ${where}`, res.status)
+  if (res.status < 200 || res.status >= 300) throw new RegistryError(`HTTP ${res.status} for ${where}`, res.status, RETRY_STATUS.has(res.status))
 }
 
 // Public endpoint for an image's own registry.

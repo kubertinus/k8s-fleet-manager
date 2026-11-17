@@ -1,5 +1,6 @@
 import { getPool } from '@/lib/database'
 import type { ImageReference } from './reference'
+import { fetchManifest, type RegistryEndpoint } from './registry'
 
 // Reads the Trivy report Harbor already stored on an artifact.
 // Does not start a scan. Harbor is skipped entirely when it is disabled or has no URL.
@@ -117,6 +118,111 @@ export async function loadHarborSettings(): Promise<HarborSettings | null> {
     password: settings.harbor_password || undefined,
     project: (settings.harbor_project || '').trim(),
   }
+}
+
+// Same rule as the harbor-mirror script: drop a leading registry host, keep repo/name:tag.
+// docker.io/library/nginx:1.27 -> library/nginx:1.27
+// registry.k8s.io/etcd:v3.6.12 -> etcd:v3.6.12
+// kubertinus/kubertinus:12.3 stays as it is
+export function normalizeMirrorPath(image: string): string | null {
+  let path = image.trim()
+  while (path.startsWith('/')) path = path.slice(1)
+  if (path.includes('/')) {
+    const first = path.slice(0, path.indexOf('/'))
+    if (first.includes('.') || first.includes(':') || first === 'localhost') path = path.slice(first.length + 1)
+  }
+  while (path.startsWith('/')) path = path.slice(1)
+  if (!path.includes(':') || path.startsWith(':') || path.endsWith(':')) return null
+  return path
+}
+
+export function splitMirrorPath(path: string): { repository: string; tag: string } | null {
+  const slash = path.lastIndexOf('/')
+  const colon = path.lastIndexOf(':')
+  if (colon <= slash) return null
+  const repository = path.slice(0, colon)
+  const tag = path.slice(colon + 1)
+  if (!repository || !tag) return null
+  return { repository, tag }
+}
+
+export interface HarborMirrorSettings {
+  url: string
+  username: string
+  password: string
+  sourceProject: string
+  targetProject: string
+}
+
+// Repository in the path is double-encoded; `from` is a query value, so once.
+export function harborCopyUrl(settings: { url: string }, targetProject: string, repository: string, from: string) {
+  const project = encodeURIComponent(targetProject)
+  const repo = encodeURIComponent(encodeURIComponent(repository))
+  return `https://${harborHost(settings.url)}/api/v2.0/projects/${project}/repositories/${repo}/artifacts?from=${encodeURIComponent(from)}`
+}
+
+export async function loadHarborMirrorSettings(): Promise<HarborMirrorSettings> {
+  const result = await getPool().query('SELECT key, value FROM settings WHERE key = ANY($1)', [
+    ['harbor_url', 'harbor_username', 'harbor_password', 'harbor_mirror_source_project', 'harbor_mirror_target_project'],
+  ])
+  const settings = Object.fromEntries(result.rows.map((row: any) => [row.key, row.value]))
+  const url = harborHost(settings.harbor_url || '')
+  const username = (settings.harbor_username || '').trim()
+  const password = settings.harbor_password || ''
+  if (!url || !username || !password) {
+    throw new Error('Harbor URL, username and password are required to pull images')
+  }
+  return {
+    url,
+    username,
+    password,
+    sourceProject: (settings.harbor_mirror_source_project || 'directpull').trim() || 'directpull',
+    targetProject: (settings.harbor_mirror_target_project || 'managed_nexus').trim() || 'managed_nexus',
+  }
+}
+
+function copyFailure(status: number, body: string) {
+  try {
+    const data = JSON.parse(body)
+    const message = Array.isArray(data?.errors) ? data.errors.map((error: any) => error?.message).filter(Boolean).join('; ') : ''
+    if (message) return `Harbor copy failed: ${message}`
+  } catch {
+    // Harbor sometimes answers with plain text
+  }
+  const trimmed = body.trim().slice(0, 180)
+  return trimmed ? `Harbor copy failed (HTTP ${status}): ${trimmed}` : `Harbor copy failed (HTTP ${status})`
+}
+
+// Pull the new tag through the source project, then copy it into the target project.
+// `image` is a full reference whose tag is already the version to mirror.
+export async function mirrorImage(settings: HarborMirrorSettings, image: string): Promise<{ target: string }> {
+  const path = normalizeMirrorPath(image)
+  const parts = path ? splitMirrorPath(path) : null
+  if (!path || !parts) throw new Error(`Not a tagged image: ${image}`)
+
+  const endpoint: RegistryEndpoint = {
+    baseUrl: `https://${harborHost(settings.url)}`,
+    username: settings.username,
+    password: settings.password,
+  }
+  const sourceName = `${settings.sourceProject}/${parts.repository}`
+  await fetchManifest(endpoint, sourceName, parts.tag)
+
+  const from = `${settings.sourceProject}/${path}`
+  const response = await fetch(harborCopyUrl(settings, settings.targetProject, parts.repository, from), {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      Authorization: `Basic ${Buffer.from(`${settings.username}:${settings.password}`).toString('base64')}`,
+    },
+    signal: AbortSignal.timeout(60_000),
+  })
+  // 409: the tag is already in the target project
+  if (response.status !== 200 && response.status !== 201 && response.status !== 409) {
+    throw new Error(copyFailure(response.status, await response.text().catch(() => '')))
+  }
+  await response.arrayBuffer().catch(() => {})
+  return { target: `${harborHost(settings.url)}/${settings.targetProject}/${path}` }
 }
 
 export async function fetchHarborScan(settings: HarborSettings, target: HarborTarget): Promise<{ summary: CveSummary | null; error?: string }> {

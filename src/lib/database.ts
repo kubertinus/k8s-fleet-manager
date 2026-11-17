@@ -631,6 +631,28 @@ async function runAllMigrations() {
     `)
   })
 
+  // Migration 20: Harbor projects used when pulling a newer image into the registry
+  await runMigration('add_harbor_mirror_projects', async () => {
+    const mirrorSettings = [
+      {
+        key: 'harbor_mirror_source_project',
+        value: 'directpull',
+        description: 'Harbor project to pull a newer image through (proxy cache)',
+      },
+      {
+        key: 'harbor_mirror_target_project',
+        value: 'managed_nexus',
+        description: 'Harbor project that receives the pulled image',
+      },
+    ]
+    for (const setting of mirrorSettings) {
+      await pool.query(
+        `INSERT INTO settings (key, value, description) VALUES ($1, $2, $3) ON CONFLICT (key) DO NOTHING`,
+        [setting.key, setting.value, setting.description]
+      )
+    }
+  })
+
   // Future migrations can be added here
   // await runMigration('migration_name', async () => { ... })
 }
