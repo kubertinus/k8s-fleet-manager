@@ -2,7 +2,7 @@ import http from 'http'
 import https from 'https'
 import { getPool } from '@/lib/database'
 import type { ImageReference } from './reference'
-import { fetchManifest, type RegistryEndpoint } from './registry'
+import { fetchManifest, type PulledImage, type RegistryEndpoint } from './registry'
 
 // Reads the Trivy report Harbor already stored on an artifact.
 // Does not start a scan. Harbor is skipped entirely when it is disabled or has no URL.
@@ -108,7 +108,7 @@ export function parseScanOverview(artifact: any): CveSummary | null {
 }
 
 // global fetch() cannot skip certificate checks, so Harbor calls go through node:https.
-function harborRequest(url: string, { method = 'GET', headers = {}, insecureTls = false, timeoutMs = REQUEST_TIMEOUT_MS }: { method?: string; headers?: Record<string, string>; insecureTls?: boolean; timeoutMs?: number } = {}): Promise<{ status: number; body: string }> {
+function harborRequest(url: string, { method = 'GET', headers = {}, insecureTls = false, timeoutMs = REQUEST_TIMEOUT_MS, body: payload }: { method?: string; headers?: Record<string, string>; insecureTls?: boolean; timeoutMs?: number; body?: string } = {}): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const target = new URL(url)
     const lib = target.protocol === 'http:' ? http : https
@@ -124,6 +124,7 @@ function harborRequest(url: string, { method = 'GET', headers = {}, insecureTls 
     )
     req.on('timeout', () => req.destroy(Object.assign(new Error('Harbor request timed out'), { name: 'TimeoutError' })))
     req.on('error', reject)
+    if (payload) req.write(payload)
     req.end()
   })
 }
@@ -208,16 +209,72 @@ export async function loadHarborMirrorSettings(): Promise<HarborMirrorSettings> 
   }
 }
 
-function copyFailure(status: number, body: string) {
+const INDEX_MEDIA_TYPE = /manifest\.list|image\.index/i
+
+export interface CachedArtifact {
+  digest: string
+  tags: string[]
+  mediaType: string
+  architecture?: string
+  os?: string
+  childDigests: string[]
+  pushTime: string
+}
+
+// Artifacts Harbor actually stored. A proxy-cache manifest list often has a different
+// digest than upstream, but it still references the platform manifests we pulled.
+export function cachedArtifacts(body: string): CachedArtifact[] {
+  let data: any
+  try {
+    data = JSON.parse(body)
+  } catch {
+    throw new Error('Harbor artifact list was not valid JSON')
+  }
+  if (!Array.isArray(data)) return []
+  return data.flatMap(item => {
+    if (typeof item?.digest !== 'string') return []
+    const tags = Array.isArray(item.tags) ? item.tags.map((tag: any) => tag?.name).filter((name: unknown) => typeof name === 'string') : []
+    const references = Array.isArray(item.references) ? item.references : []
+    return [{
+      digest: item.digest,
+      tags,
+      mediaType: typeof item.manifest_media_type === 'string' ? item.manifest_media_type : (typeof item.media_type === 'string' ? item.media_type : ''),
+      architecture: typeof item.extra_attrs?.architecture === 'string' ? item.extra_attrs.architecture : undefined,
+      os: typeof item.extra_attrs?.os === 'string' ? item.extra_attrs.os : undefined,
+      childDigests: references.map((reference: any) => reference?.child_digest).filter((digest: unknown) => typeof digest === 'string'),
+      pushTime: typeof item.push_time === 'string' ? item.push_time : '',
+    }]
+  })
+}
+
+// Prefer the tagged artifact, then the index we pulled, then the index Harbor built
+// around those platforms, then the linux/amd64 image the mirror script would push.
+export function pickCachedDigest(artifacts: CachedArtifact[], tag: string, known: string[]): string | null {
+  const tagged = artifacts.find(artifact => artifact.tags.includes(tag))
+  if (tagged) return tagged.digest
+  const wanted = new Set(known)
+  const matched = artifacts.filter(artifact => wanted.has(artifact.digest))
+  const index = matched.find(artifact => INDEX_MEDIA_TYPE.test(artifact.mediaType))
+  if (index) return index.digest
+  const rebuilt = artifacts
+    .filter(artifact => INDEX_MEDIA_TYPE.test(artifact.mediaType) && artifact.childDigests.some(digest => wanted.has(digest)))
+    .sort((a, b) => b.pushTime.localeCompare(a.pushTime))[0]
+  if (rebuilt) return rebuilt.digest
+  const amd64 = matched.find(artifact => artifact.os === 'linux' && artifact.architecture === 'amd64')
+  if (amd64) return amd64.digest
+  return matched.find(artifact => !INDEX_MEDIA_TYPE.test(artifact.mediaType))?.digest ?? matched[0]?.digest ?? null
+}
+
+function copyFailure(status: number, body: string, action = 'Harbor copy failed') {
   try {
     const data = JSON.parse(body)
     const message = Array.isArray(data?.errors) ? data.errors.map((error: any) => error?.message).filter(Boolean).join('; ') : ''
-    if (message) return `Harbor copy failed: ${message}`
+    if (message) return `${action}: ${message}`
   } catch {
     // Harbor sometimes answers with plain text
   }
   const trimmed = body.trim().slice(0, 180)
-  return trimmed ? `Harbor copy failed (HTTP ${status}): ${trimmed}` : `Harbor copy failed (HTTP ${status})`
+  return trimmed ? `${action} (HTTP ${status}): ${trimmed}` : `${action} (HTTP ${status})`
 }
 
 // Pull the new tag through the source project, then copy it into the target project.
@@ -234,34 +291,75 @@ export async function mirrorImage(settings: HarborMirrorSettings, image: string)
     insecureTls: settings.insecureTls,
   }
   const sourceName = `${settings.sourceProject}/${parts.repository}`
-  await fetchManifest(endpoint, sourceName, parts.tag)
+  const pulled = await fetchManifest(endpoint, sourceName, parts.tag)
 
-  const from = `${settings.sourceProject}/${path}`
-  const copyUrl = harborCopyUrl(settings, settings.targetProject, parts.repository, from)
   const headers = {
     Accept: 'application/json',
     Authorization: `Basic ${Buffer.from(`${settings.username}:${settings.password}`).toString('base64')}`,
   }
-  // Harbor registers the artifact a moment after the blobs have been stored.
+  const target = `${harborHost(settings.url)}/${settings.targetProject}/${path}`
+  const taggedFrom = `${settings.sourceProject}/${path}`
+  const tagged = await copyArtifact(settings, headers, parts.repository, taggedFrom)
+  if (!tagged) return { target }
+
+  // Proxy cache often stores the layers without the tag. Copy the digest Harbor has, then tag the target.
+  const digest = await cachedDigest(settings, headers, parts.repository, parts.tag, pulled)
+  if (!digest) throw new Error(tagged)
+  const from = `${settings.sourceProject}/${parts.repository}@${digest}`
+  console.log(`[image-mirror] ${taggedFrom} has no tag in ${settings.sourceProject}, copying ${from}`)
+  const copied = await copyArtifact(settings, headers, parts.repository, from, 1)
+  if (copied) throw new Error(copied)
+  await createTag(settings, headers, settings.targetProject, parts.repository, digest, parts.tag)
+  return { target }
+}
+
+// null when the copy landed (or was already there). Otherwise the Harbor error.
+async function copyArtifact(settings: HarborMirrorSettings, headers: Record<string, string>, repository: string, from: string, attempts = 6): Promise<string | null> {
+  const copyUrl = harborCopyUrl(settings, settings.targetProject, repository, from)
   let failure = 'Harbor copy failed'
-  for (let attempt = 0; attempt < 6; attempt++) {
+  for (let attempt = 0; attempt < attempts; attempt++) {
     const response = await harborRequest(copyUrl, {
       method: 'POST',
       headers,
       insecureTls: settings.insecureTls,
       timeoutMs: 60_000,
     })
-    // 409: the tag is already in the target project
-    if (response.status === 200 || response.status === 201 || response.status === 409) {
-      return { target: `${harborHost(settings.url)}/${settings.targetProject}/${path}` }
-    }
+    // 409: the artifact is already in the target project
+    if (response.status === 200 || response.status === 201 || response.status === 409) return null
     failure = copyFailure(response.status, response.body)
     const missing = response.status === 404 || /not found/i.test(response.body)
-    if (!missing || attempt === 5) break
+    if (!missing || attempt === attempts - 1) return failure
     console.log(`[image-mirror] ${from} not registered yet, retrying`)
     await new Promise(resolve => setTimeout(resolve, 3000))
   }
-  throw new Error(failure)
+  return failure
+}
+
+async function cachedDigest(settings: HarborMirrorSettings, headers: Record<string, string>, repository: string, tag: string, pulled: PulledImage): Promise<string | null> {
+  const repo = encodeURIComponent(encodeURIComponent(repository))
+  const url = `https://${harborHost(settings.url)}/api/v2.0/projects/${encodeURIComponent(settings.sourceProject)}/repositories/${repo}/artifacts?with_tag=true&page_size=100&sort=-push_time`
+  const response = await harborRequest(url, { headers, insecureTls: settings.insecureTls, timeoutMs: 30_000 })
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error(copyFailure(response.status, response.body, 'Harbor artifact list failed'))
+  }
+  const known = [...pulled.manifests]
+  if (pulled.digest && !known.includes(pulled.digest)) known.push(pulled.digest)
+  return pickCachedDigest(cachedArtifacts(response.body), tag, known)
+}
+
+async function createTag(settings: HarborMirrorSettings, headers: Record<string, string>, project: string, repository: string, digest: string, tag: string) {
+  const repo = encodeURIComponent(encodeURIComponent(repository))
+  const url = `https://${harborHost(settings.url)}/api/v2.0/projects/${encodeURIComponent(project)}/repositories/${repo}/artifacts/${encodeURIComponent(digest)}/tags`
+  const response = await harborRequest(url, {
+    method: 'POST',
+    headers: { ...headers, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: tag }),
+    insecureTls: settings.insecureTls,
+    timeoutMs: 30_000,
+  })
+  // 409: this tag already points at the artifact
+  if (response.status === 200 || response.status === 201 || response.status === 409) return
+  throw new Error(copyFailure(response.status, response.body, 'Harbor tag failed'))
 }
 
 export async function fetchHarborScan(settings: HarborSettings, target: HarborTarget): Promise<{ summary: CveSummary | null; error?: string }> {

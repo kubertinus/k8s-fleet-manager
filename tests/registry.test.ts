@@ -162,7 +162,12 @@ describe('fetchManifest', () => {
     pullServer = http.createServer((req, res) => {
       const url = new URL(req.url!, 'http://localhost')
       const pathname = decodeURIComponent(url.pathname)
-      hits.push(pathname)
+      hits.push(`${req.method} ${pathname}`)
+      if (req.method === 'HEAD' && pathname === '/v2/library/nginx/manifests/1.27') {
+        res.setHeader('Docker-Content-Digest', CHILD)
+        res.end()
+        return
+      }
       if (pathname === `/v2/library/nginx/manifests/1.27`) {
         res.end(JSON.stringify({ manifests: [{ digest: CHILD }] }))
         return
@@ -191,11 +196,12 @@ describe('fetchManifest', () => {
   it('fetches every platform manifest and blob, then the tag again', async () => {
     await fetchManifest({ baseUrl: pullBase }, 'library/nginx', '1.27', { timeoutMs: 5000 })
     expect(hits).toEqual([
-      '/v2/library/nginx/manifests/1.27',
-      `/v2/library/nginx/manifests/${CHILD}`,
-      `/v2/library/nginx/blobs/${CONFIG}`,
-      `/v2/library/nginx/blobs/${LAYER}`,
-      '/v2/library/nginx/manifests/1.27',
+      'HEAD /v2/library/nginx/manifests/1.27',
+      'GET /v2/library/nginx/manifests/1.27',
+      `GET /v2/library/nginx/manifests/${CHILD}`,
+      `GET /v2/library/nginx/blobs/${CONFIG}`,
+      `GET /v2/library/nginx/blobs/${LAYER}`,
+      'HEAD /v2/library/nginx/manifests/1.27',
     ])
   })
 })

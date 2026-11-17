@@ -38,18 +38,18 @@ interface RawResponse {
   body: string
 }
 
-function request(url: string, headers: Record<string, string>, insecureTls = false, timeoutMs = REQUEST_TIMEOUT_MS): Promise<RawResponse> {
+function request(url: string, headers: Record<string, string>, insecureTls = false, timeoutMs = REQUEST_TIMEOUT_MS, method: 'GET' | 'HEAD' = 'GET'): Promise<RawResponse> {
   return new Promise((resolve, reject) => {
     const target = new URL(url)
     const lib = target.protocol === 'http:' ? http : https
     const req = lib.request(
       target,
-      { method: 'GET', headers: { 'User-Agent': 'k8s-fleet-manager', ...headers }, rejectUnauthorized: !insecureTls, timeout: timeoutMs },
+      { method, headers: { 'User-Agent': 'k8s-fleet-manager', ...headers }, rejectUnauthorized: !insecureTls, timeout: timeoutMs },
       res => {
         // Follow redirects (some registries redirect token or tag requests)
         if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
           res.resume()
-          request(new URL(res.headers.location, target).toString(), headers, insecureTls, timeoutMs).then(resolve, reject)
+          request(new URL(res.headers.location, target).toString(), headers, insecureTls, timeoutMs, method).then(resolve, reject)
           return
         }
         let body = ''
@@ -75,10 +75,10 @@ function retryDelay(attempt: number, retryAfter?: string | string[]) {
 
 // request() with retries for transient failures. Permanent answers (404, 401, ...)
 // and unknown hosts come back at once.
-async function requestWithRetry(url: string, headers: Record<string, string>, insecureTls: boolean | undefined, retries: number, timeoutMs = REQUEST_TIMEOUT_MS): Promise<RawResponse> {
+async function requestWithRetry(url: string, headers: Record<string, string>, insecureTls: boolean | undefined, retries: number, timeoutMs = REQUEST_TIMEOUT_MS, method: 'GET' | 'HEAD' = 'GET'): Promise<RawResponse> {
   for (let attempt = 0; ; attempt++) {
     try {
-      const res = await request(url, headers, insecureTls, timeoutMs)
+      const res = await request(url, headers, insecureTls, timeoutMs, method)
       if (!RETRY_STATUS.has(res.status) || attempt >= retries) return res
       await retryTiming.sleep(retryDelay(attempt, res.headers['retry-after']))
     } catch (error: any) {
@@ -306,28 +306,38 @@ function ensureOk(status: number, where: string) {
   if (status < 200 || status >= 300) throw new RegistryError(`HTTP ${status} for ${where}`, status, RETRY_STATUS.has(status))
 }
 
+// What a proxy-cache pull left behind. Harbor tags an artifact from a HEAD by tag, and
+// the digest it stores for a manifest list can differ from the upstream digest.
+export interface PulledImage {
+  digest?: string
+  manifests: string[]
+}
+
 // Pull an image through a registry, including a Harbor proxy-cache project.
-// A manifest response is not enough: Harbor only registers the artifact once every
-// config and layer has been fetched. Manifest lists are walked so each platform is stored.
+// Harbor only keeps a tag when the client HEADs the manifest by tag (as docker pull
+// does) and every referenced blob has been fetched. A GET alone stores untagged layers.
 // Throws RegistryError.
 export async function fetchManifest(
   endpoint: RegistryEndpoint,
   repository: string,
   reference: string,
   { timeoutMs = 180_000, retries = 0 }: { timeoutMs?: number; retries?: number } = {}
-): Promise<void> {
+): Promise<PulledImage> {
   const base = endpoint.baseUrl.replace(/\/$/, '')
   const name = repository.split('/').map(part => encodeURIComponent(part)).join('/')
   let authorization = basicAuth(endpoint)
 
-  async function call(url: string, accept: string | undefined, stream: boolean) {
+  async function call(url: string, accept: string | undefined, stream: boolean, method: 'GET' | 'HEAD' = 'GET') {
     const headers: Record<string, string> = {}
     if (accept) headers.Accept = accept
     if (authorization) headers.Authorization = authorization
     try {
-      const load = () => (stream
-        ? drainWithRetry(url, headers, endpoint.insecureTls, retries, timeoutMs)
-        : requestWithRetry(url, headers, endpoint.insecureTls, retries, timeoutMs))
+      const load = () => {
+        if (method === 'HEAD') return requestWithRetry(url, headers, endpoint.insecureTls, retries, timeoutMs, 'HEAD')
+        return stream
+          ? drainWithRetry(url, headers, endpoint.insecureTls, retries, timeoutMs)
+          : requestWithRetry(url, headers, endpoint.insecureTls, retries, timeoutMs)
+      }
       let res = await load()
       if (res.status === 401) {
         const challenge = parseChallenge(res.headers['www-authenticate'] as string | undefined)
@@ -343,15 +353,34 @@ export async function fetchManifest(
     }
   }
 
+  function digestHeader(headers: http.IncomingHttpHeaders) {
+    const raw = headers['docker-content-digest']
+    const digest = Array.isArray(raw) ? raw[0] : raw
+    return digest && DIGEST.test(digest) ? digest : undefined
+  }
+
+  // HEAD by tag is what makes Harbor remember the tag. A miss is fine: the GET below
+  // still pulls the manifest, and a registry that has no HEAD must not fail the pull.
+  async function headManifest(ref: string) {
+    const url = `${base}/v2/${name}/manifests/${encodeURIComponent(ref)}`
+    const res = await call(url, MANIFEST_ACCEPT, false, 'HEAD')
+    if (res.status === 404 || res.status === 405 || res.status === 400 || res.status === 501) return undefined
+    ensureOk(res.status, `${repository}:${ref}`)
+    return digestHeader(res.headers)
+  }
+
   async function manifest(ref: string) {
     const url = `${base}/v2/${name}/manifests/${encodeURIComponent(ref)}`
     const res = await call(url, MANIFEST_ACCEPT, false)
     ensureOk(res.status, `${repository}:${ref}`)
     if (!('body' in res) || typeof res.body !== 'string') throw new RegistryError('Registry returned an empty manifest')
-    return res.body
+    return { body: res.body, digest: digestHeader(res.headers) }
   }
 
+  let rootDigest = DIGEST.test(reference) ? reference : await headManifest(reference)
+
   const seen = new Set<string>()
+  const manifests: string[] = []
   const blobs = new Set<string>()
   const queue = [reference]
   while (queue.length > 0) {
@@ -359,7 +388,13 @@ export async function fetchManifest(
     if (seen.has(ref)) continue
     if (seen.size >= MAX_MANIFESTS) throw new RegistryError(`Too many manifests for ${repository}:${reference}`)
     seen.add(ref)
-    const refs = manifestRefs(await manifest(ref))
+    const loaded = await manifest(ref)
+    if (DIGEST.test(ref) && !manifests.includes(ref)) manifests.push(ref)
+    if (loaded.digest) {
+      if (ref === reference) rootDigest = loaded.digest
+      if (!manifests.includes(loaded.digest)) manifests.push(loaded.digest)
+    }
+    const refs = manifestRefs(loaded.body)
     for (const digest of refs.blobs) blobs.add(digest)
     for (const digest of refs.manifests) {
       if (!seen.has(digest)) queue.push(digest)
@@ -372,9 +407,13 @@ export async function fetchManifest(
     ensureOk(res.status, `${repository}@${digest}`)
   }
 
-  // The proxy stores the tag only after the blobs exist. Ask for it once more so
-  // Harbor commits the artifact before the caller copies it.
-  if (blobs.size > 0) await manifest(reference)
+  // Blobs exist now. HEAD the tag again so Harbor can attach it to the cached manifest.
+  if (!DIGEST.test(reference) && blobs.size > 0) {
+    const again = await headManifest(reference)
+    if (again) rootDigest = again
+  }
+
+  return { digest: rootDigest, manifests }
 }
 
 // Public endpoint for an image's own registry.

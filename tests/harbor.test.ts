@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { harborArtifactUrl, harborCopyUrl, normalizeMirrorPath, parseScanOverview, resolveHarborTarget, type HarborSettings } from '@/lib/images/harbor'
+import { cachedArtifacts, harborArtifactUrl, harborCopyUrl, normalizeMirrorPath, parseScanOverview, pickCachedDigest, resolveHarborTarget, type HarborSettings } from '@/lib/images/harbor'
 import { parseImageReference } from '@/lib/images/reference'
 
 const harbor: HarborSettings = {
@@ -66,6 +66,24 @@ describe('harborCopyUrl', () => {
     expect(url).toBe(
       'https://harbor.example.com/api/v2.0/projects/managed_nexus/repositories/library%252Fnginx/artifacts?from=directpull%2Flibrary%2Fnginx%3A1.27'
     )
+  })
+})
+
+describe('pickCachedDigest', () => {
+  const index = `sha256:${'a'.repeat(64)}`
+  const amd64 = `sha256:${'b'.repeat(64)}`
+  const arm64 = `sha256:${'c'.repeat(64)}`
+  const trimmed = `sha256:${'d'.repeat(64)}`
+
+  it('uses the tag, then the pulled index, then the index Harbor rebuilt', () => {
+    const artifacts = cachedArtifacts(JSON.stringify([
+      { digest: amd64, tags: null, manifest_media_type: 'application/vnd.oci.image.manifest.v1+json', extra_attrs: { os: 'linux', architecture: 'amd64' } },
+      { digest: arm64, manifest_media_type: 'application/vnd.oci.image.manifest.v1+json', extra_attrs: { os: 'linux', architecture: 'arm64' } },
+      { digest: trimmed, tags: [{ name: '1.27' }], manifest_media_type: 'application/vnd.oci.image.index.v1+json', references: [{ child_digest: amd64 }], push_time: '2026-11-17T00:00:00Z' },
+    ]))
+    expect(pickCachedDigest(artifacts, '1.27', [index, amd64, arm64])).toBe(trimmed)
+    expect(pickCachedDigest(artifacts.map(artifact => ({ ...artifact, tags: [] })), '1.27', [index, amd64])).toBe(trimmed)
+    expect(pickCachedDigest(artifacts.map(artifact => ({ ...artifact, tags: [], childDigests: [] })), '1.27', [amd64, arm64])).toBe(amd64)
   })
 })
 
