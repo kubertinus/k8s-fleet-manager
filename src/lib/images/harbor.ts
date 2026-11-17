@@ -237,20 +237,31 @@ export async function mirrorImage(settings: HarborMirrorSettings, image: string)
   await fetchManifest(endpoint, sourceName, parts.tag)
 
   const from = `${settings.sourceProject}/${path}`
-  const response = await harborRequest(harborCopyUrl(settings, settings.targetProject, parts.repository, from), {
-    method: 'POST',
-    headers: {
-      Accept: 'application/json',
-      Authorization: `Basic ${Buffer.from(`${settings.username}:${settings.password}`).toString('base64')}`,
-    },
-    insecureTls: settings.insecureTls,
-    timeoutMs: 60_000,
-  })
-  // 409: the tag is already in the target project
-  if (response.status !== 200 && response.status !== 201 && response.status !== 409) {
-    throw new Error(copyFailure(response.status, response.body))
+  const copyUrl = harborCopyUrl(settings, settings.targetProject, parts.repository, from)
+  const headers = {
+    Accept: 'application/json',
+    Authorization: `Basic ${Buffer.from(`${settings.username}:${settings.password}`).toString('base64')}`,
   }
-  return { target: `${harborHost(settings.url)}/${settings.targetProject}/${path}` }
+  // Harbor registers the artifact a moment after the blobs have been stored.
+  let failure = 'Harbor copy failed'
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const response = await harborRequest(copyUrl, {
+      method: 'POST',
+      headers,
+      insecureTls: settings.insecureTls,
+      timeoutMs: 60_000,
+    })
+    // 409: the tag is already in the target project
+    if (response.status === 200 || response.status === 201 || response.status === 409) {
+      return { target: `${harborHost(settings.url)}/${settings.targetProject}/${path}` }
+    }
+    failure = copyFailure(response.status, response.body)
+    const missing = response.status === 404 || /not found/i.test(response.body)
+    if (!missing || attempt === 5) break
+    console.log(`[image-mirror] ${from} not registered yet, retrying`)
+    await new Promise(resolve => setTimeout(resolve, 3000))
+  }
+  throw new Error(failure)
 }
 
 export async function fetchHarborScan(settings: HarborSettings, target: HarborTarget): Promise<{ summary: CveSummary | null; error?: string }> {

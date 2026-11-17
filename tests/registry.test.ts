@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import http from 'http'
 import type { AddressInfo } from 'net'
-import { listTags, RegistryError, retryTiming } from '@/lib/images/registry'
+import { fetchManifest, listTags, manifestRefs, RegistryError, retryTiming } from '@/lib/images/registry'
 
 // A tiny registry: two pages of tags, a Link header pointing at another host
 // (as Nexus does behind a proxy) and a bearer-token protected repository.
@@ -128,5 +128,74 @@ describe('listTags retries', () => {
     failures.set('/v2/flaky/tags/list', 1)
     await expect(listTags({ baseUrl: base }, 'flaky', { retries: 0 })).rejects.toMatchObject({ status: 503 })
     expect(calls.get('/v2/flaky/tags/list')).toBe(1)
+  })
+})
+
+const CHILD = `sha256:${'a'.repeat(64)}`
+const CONFIG = `sha256:${'b'.repeat(64)}`
+const LAYER = `sha256:${'c'.repeat(64)}`
+
+describe('manifestRefs', () => {
+  it('reads an index, an image manifest and a schema 1 manifest', () => {
+    expect(manifestRefs(JSON.stringify({ manifests: [{ digest: CHILD }, { digest: 'not-a-digest' }] }))).toEqual({
+      manifests: [CHILD],
+      blobs: [],
+    })
+    expect(manifestRefs(JSON.stringify({ config: { digest: CONFIG }, layers: [{ digest: LAYER }, { digest: LAYER }] }))).toEqual({
+      manifests: [],
+      blobs: [CONFIG, LAYER],
+    })
+    expect(manifestRefs(JSON.stringify({ fsLayers: [{ blobSum: LAYER }] }))).toEqual({ manifests: [], blobs: [LAYER] })
+  })
+
+  it('rejects a manifest that is not JSON', () => {
+    expect(() => manifestRefs('<!DOCTYPE html>')).toThrow(RegistryError)
+  })
+})
+
+describe('fetchManifest', () => {
+  let pullServer: http.Server
+  let pullBase: string
+  const hits: string[] = []
+
+  beforeAll(async () => {
+    pullServer = http.createServer((req, res) => {
+      const url = new URL(req.url!, 'http://localhost')
+      const pathname = decodeURIComponent(url.pathname)
+      hits.push(pathname)
+      if (pathname === `/v2/library/nginx/manifests/1.27`) {
+        res.end(JSON.stringify({ manifests: [{ digest: CHILD }] }))
+        return
+      }
+      if (pathname === `/v2/library/nginx/manifests/${CHILD}`) {
+        res.end(JSON.stringify({ config: { digest: CONFIG }, layers: [{ digest: LAYER }] }))
+        return
+      }
+      if (pathname.startsWith('/v2/library/nginx/blobs/')) {
+        res.end('layer')
+        return
+      }
+      res.statusCode = 404
+      res.end()
+    })
+    await new Promise<void>(resolve => pullServer.listen(0, '127.0.0.1', resolve))
+    pullBase = `http://127.0.0.1:${(pullServer.address() as AddressInfo).port}`
+  })
+
+  afterAll(() => new Promise<void>(resolve => pullServer.close(() => resolve())))
+
+  beforeEach(() => {
+    hits.length = 0
+  })
+
+  it('fetches every platform manifest and blob, then the tag again', async () => {
+    await fetchManifest({ baseUrl: pullBase }, 'library/nginx', '1.27', { timeoutMs: 5000 })
+    expect(hits).toEqual([
+      '/v2/library/nginx/manifests/1.27',
+      `/v2/library/nginx/manifests/${CHILD}`,
+      `/v2/library/nginx/blobs/${CONFIG}`,
+      `/v2/library/nginx/blobs/${LAYER}`,
+      '/v2/library/nginx/manifests/1.27',
+    ])
   })
 })

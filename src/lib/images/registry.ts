@@ -215,8 +215,101 @@ const MANIFEST_ACCEPT = [
   'application/vnd.docker.distribution.manifest.v1+prettyjws',
 ].join(', ')
 
-// GET the manifest. A proxy-cache project (Harbor directpull) fetches the image from
-// upstream while answering, so this is the pull. Throws RegistryError.
+const DIGEST = /^sha256:[a-f0-9]{64}$/i
+const MAX_MANIFESTS = 64
+const MAX_REDIRECTS = 5
+
+// Digests a manifest points at. `manifests` are child indexes (one per platform);
+// `blobs` are the config and layers Harbor must store before the artifact exists.
+export function manifestRefs(body: string): { manifests: string[]; blobs: string[] } {
+  let data: any
+  try {
+    data = JSON.parse(body)
+  } catch {
+    throw new RegistryError('Registry returned invalid JSON')
+  }
+  const manifests: string[] = []
+  const blobs: string[] = []
+  const add = (list: string[], value: unknown) => {
+    if (typeof value !== 'string' || !DIGEST.test(value) || list.includes(value)) return
+    list.push(value)
+  }
+  if (Array.isArray(data?.manifests)) {
+    for (const item of data.manifests) add(manifests, item?.digest)
+  }
+  add(blobs, data?.config?.digest)
+  if (Array.isArray(data?.layers)) {
+    for (const layer of data.layers) add(blobs, layer?.digest)
+  }
+  if (Array.isArray(data?.fsLayers)) {
+    for (const layer of data.fsLayers) add(blobs, layer?.blobSum)
+  }
+  return { manifests, blobs }
+}
+
+function withoutAuthorization(headers: Record<string, string>) {
+  const copy = { ...headers }
+  delete copy.Authorization
+  delete copy.authorization
+  return copy
+}
+
+// Read a body and discard it. Blob downloads must not be buffered: a layer can be
+// hundreds of megabytes. Redirects to another host drop Authorization.
+function drain(url: string, headers: Record<string, string>, insecureTls = false, timeoutMs = REQUEST_TIMEOUT_MS, redirects = 0): Promise<{ status: number; headers: http.IncomingHttpHeaders }> {
+  return new Promise((resolve, reject) => {
+    const target = new URL(url)
+    const lib = target.protocol === 'http:' ? http : https
+    const req = lib.request(
+      target,
+      { method: 'GET', headers: { 'User-Agent': 'k8s-fleet-manager', ...headers }, rejectUnauthorized: !insecureTls, timeout: timeoutMs },
+      res => {
+        if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          res.resume()
+          if (redirects >= MAX_REDIRECTS) {
+            reject(new RegistryError(`Too many redirects for ${target.pathname}`))
+            return
+          }
+          const next = new URL(res.headers.location, target)
+          const nextHeaders = next.host === target.host ? headers : withoutAuthorization(headers)
+          drain(next.toString(), nextHeaders, insecureTls, timeoutMs, redirects + 1).then(resolve, reject)
+          return
+        }
+        res.resume()
+        res.on('error', reject)
+        res.on('end', () => resolve({ status: res.statusCode || 0, headers: res.headers }))
+      }
+    )
+    req.on('timeout', () => req.destroy(new RegistryError(`Timeout after ${timeoutMs / 1000}s`, undefined, true)))
+    req.on('error', reject)
+    req.end()
+  })
+}
+
+async function drainWithRetry(url: string, headers: Record<string, string>, insecureTls: boolean | undefined, retries: number, timeoutMs: number) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const res = await drain(url, headers, insecureTls, timeoutMs)
+      if (!RETRY_STATUS.has(res.status) || attempt >= retries) return res
+      await retryTiming.sleep(retryDelay(attempt, res.headers['retry-after']))
+    } catch (error: any) {
+      const transient = RETRY_CODES.has(error?.code) || (error instanceof RegistryError && error.transient)
+      if (!transient || attempt >= retries) throw error
+      await retryTiming.sleep(retryDelay(attempt))
+    }
+  }
+}
+
+function ensureOk(status: number, where: string) {
+  if (status === 404) throw new RegistryError(`Not found: ${where}`, 404)
+  if (status === 401 || status === 403) throw new RegistryError(`Access denied (HTTP ${status}) for ${where}`, status)
+  if (status < 200 || status >= 300) throw new RegistryError(`HTTP ${status} for ${where}`, status, RETRY_STATUS.has(status))
+}
+
+// Pull an image through a registry, including a Harbor proxy-cache project.
+// A manifest response is not enough: Harbor only registers the artifact once every
+// config and layer has been fetched. Manifest lists are walked so each platform is stored.
+// Throws RegistryError.
 export async function fetchManifest(
   endpoint: RegistryEndpoint,
   repository: string,
@@ -225,29 +318,63 @@ export async function fetchManifest(
 ): Promise<void> {
   const base = endpoint.baseUrl.replace(/\/$/, '')
   const name = repository.split('/').map(part => encodeURIComponent(part)).join('/')
-  const url = `${base}/v2/${name}/manifests/${encodeURIComponent(reference)}`
-  const headers: Record<string, string> = { Accept: MANIFEST_ACCEPT }
   let authorization = basicAuth(endpoint)
-  if (authorization) headers.Authorization = authorization
 
-  let res: RawResponse
-  try {
-    res = await requestWithRetry(url, headers, endpoint.insecureTls, retries, timeoutMs)
-    if (res.status === 401) {
-      const challenge = parseChallenge(res.headers['www-authenticate'] as string | undefined)
-      if (challenge?.scheme === 'bearer' && challenge.params.realm) {
-        authorization = `Bearer ${await bearerToken(endpoint, challenge.params, repository, retries)}`
-        res = await requestWithRetry(url, { ...headers, Authorization: authorization }, endpoint.insecureTls, retries, timeoutMs)
+  async function call(url: string, accept: string | undefined, stream: boolean) {
+    const headers: Record<string, string> = {}
+    if (accept) headers.Accept = accept
+    if (authorization) headers.Authorization = authorization
+    try {
+      const load = () => (stream
+        ? drainWithRetry(url, headers, endpoint.insecureTls, retries, timeoutMs)
+        : requestWithRetry(url, headers, endpoint.insecureTls, retries, timeoutMs))
+      let res = await load()
+      if (res.status === 401) {
+        const challenge = parseChallenge(res.headers['www-authenticate'] as string | undefined)
+        if (challenge?.scheme === 'bearer' && challenge.params.realm) {
+          authorization = `Bearer ${await bearerToken(endpoint, challenge.params, repository, retries)}`
+          headers.Authorization = authorization
+          res = await load()
+        }
       }
+      return res
+    } catch (error) {
+      throw describeNetworkError(error, url)
     }
-  } catch (error) {
-    throw describeNetworkError(error, url)
   }
 
-  const where = `${repository}:${reference}`
-  if (res.status === 404) throw new RegistryError(`Not found: ${where}`, 404)
-  if (res.status === 401 || res.status === 403) throw new RegistryError(`Access denied (HTTP ${res.status}) for ${where}`, res.status)
-  if (res.status < 200 || res.status >= 300) throw new RegistryError(`HTTP ${res.status} for ${where}`, res.status, RETRY_STATUS.has(res.status))
+  async function manifest(ref: string) {
+    const url = `${base}/v2/${name}/manifests/${encodeURIComponent(ref)}`
+    const res = await call(url, MANIFEST_ACCEPT, false)
+    ensureOk(res.status, `${repository}:${ref}`)
+    if (!('body' in res) || typeof res.body !== 'string') throw new RegistryError('Registry returned an empty manifest')
+    return res.body
+  }
+
+  const seen = new Set<string>()
+  const blobs = new Set<string>()
+  const queue = [reference]
+  while (queue.length > 0) {
+    const ref = queue.shift()!
+    if (seen.has(ref)) continue
+    if (seen.size >= MAX_MANIFESTS) throw new RegistryError(`Too many manifests for ${repository}:${reference}`)
+    seen.add(ref)
+    const refs = manifestRefs(await manifest(ref))
+    for (const digest of refs.blobs) blobs.add(digest)
+    for (const digest of refs.manifests) {
+      if (!seen.has(digest)) queue.push(digest)
+    }
+  }
+
+  for (const digest of blobs) {
+    const url = `${base}/v2/${name}/blobs/${encodeURIComponent(digest)}`
+    const res = await call(url, undefined, true)
+    ensureOk(res.status, `${repository}@${digest}`)
+  }
+
+  // The proxy stores the tag only after the blobs exist. Ask for it once more so
+  // Harbor commits the artifact before the caller copies it.
+  if (blobs.size > 0) await manifest(reference)
 }
 
 // Public endpoint for an image's own registry.
