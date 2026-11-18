@@ -67,11 +67,23 @@ export interface Schedule {
   nextRunAt: string | null
 }
 
+export interface MirrorRun {
+  id: number
+  status: 'running' | 'completed' | 'failed'
+  started_at: string
+  finished_at: string | null
+  mirrored: number
+  failed: number
+  error: string | null
+}
+
 export interface ImageReportData {
   images: ReportImage[]
   clusters: ClusterScan[]
   running: ScanRun | null
   lastRun: ScanRun | null
+  mirrorRunning: MirrorRun | null
+  mirrorLast: MirrorRun | null
   schedule: Schedule
   canEditSchedule: boolean
 }

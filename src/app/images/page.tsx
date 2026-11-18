@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { AlertTriangle, CalendarClock, Download, Layers, Loader2, Package, RotateCw, ScanSearch, Search } from 'lucide-react'
 import AppShell from '@/components/layout/AppShell'
@@ -92,13 +92,29 @@ export default function ImagesPage() {
     }
   }, [load])
 
-  // Follow a running scan until it finishes
+  // Follow a running scan or Harbor pull until it finishes. The result is stored
+  // with the run, so a refresh still shows it.
   const running = !!data?.running
+  const mirrorRunning = !!data?.mirrorRunning
   useEffect(() => {
-    if (!running) return
+    if (!running && !mirrorRunning) return
     const interval = setInterval(load, POLL_WHILE_RUNNING_MS)
     return () => clearInterval(interval)
-  }, [running, load])
+  }, [running, mirrorRunning, load])
+
+  // A pull that was already finished when the page opened must not clear a new selection.
+  const mirrorSeen = useRef<number | null>(null)
+  useEffect(() => {
+    if (!data) return
+    if (mirrorSeen.current === null) {
+      mirrorSeen.current = data.mirrorLast?.id ?? 0
+      return
+    }
+    const last = data.mirrorLast
+    if (!last || data.mirrorRunning || last.id === mirrorSeen.current) return
+    mirrorSeen.current = last.id
+    if (last.status === 'completed' && last.failed === 0) setSelected(new Set())
+  }, [data])
 
   const changeView = (next: View) => {
     setView(next)
@@ -151,9 +167,10 @@ export default function ImagesPage() {
     [data, selected]
   )
 
+  const pullBusy = mirroring || !!data?.mirrorRunning
+
   const mirror = async () => {
     setMirroring(true)
-    setNotice(null)
     setError(null)
     try {
       const response = await fetch('/api/images/mirror', {
@@ -161,13 +178,10 @@ export default function ImagesPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ images: selectedUpdates.map(image => image.image) }),
       })
-      const body = await response.json()
+      const body = await response.json().catch(() => ({}))
+      if (response.status === 409) throw new Error(body.error || 'A pull is already running')
       if (!response.ok) throw new Error(body.error || 'Pull to Harbor failed')
-      const failed = (body.failed ?? []) as { image: string; error: string }[]
-      const mirrored = body.mirrored ?? 0
-      const summary = `Pulled ${mirrored} image${mirrored === 1 ? '' : 's'} to Harbor.`
-      setNotice(failed.length ? `${summary} ${failed.length} failed: ${failed.map(item => `${item.image} (${item.error})`).join('; ')}` : summary)
-      if (!failed.length) setSelected(new Set())
+      await load()
     } catch (err: any) {
       setError(err.message)
     } finally {
@@ -292,13 +306,13 @@ export default function ImagesPage() {
       actions={
         <>
           {selectedUpdates.length > 0 && (
-            <button onClick={mirror} disabled={mirroring || rechecking} className="btn-secondary">
-              {mirroring ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-              <span className="hidden sm:inline">{mirroring ? 'Pulling…' : `Pull ${selectedUpdates.length} to Harbor`}</span>
+            <button onClick={mirror} disabled={pullBusy || rechecking} className="btn-secondary">
+              {pullBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+              <span className="hidden sm:inline">{pullBusy ? 'Pulling…' : `Pull ${selectedUpdates.length} to Harbor`}</span>
             </button>
           )}
           {selected.size > 0 && (
-            <button onClick={recheck} disabled={rechecking || mirroring} className="btn-secondary">
+            <button onClick={recheck} disabled={rechecking || pullBusy} className="btn-secondary">
               <RotateCw className={cn('h-4 w-4', rechecking && 'animate-spin')} />
               <span className="hidden sm:inline">{rechecking ? 'Checking…' : `Re-check ${selected.size} selected`}</span>
             </button>
@@ -316,6 +330,24 @@ export default function ImagesPage() {
     >
       {error && <div className="mb-4 rounded-lg border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">{error}</div>}
       {notice && <div className="mb-4 rounded-lg border border-slate-700 bg-slate-900 px-4 py-3 text-sm text-slate-300">{notice}</div>}
+
+      {data?.mirrorRunning && (
+        <div className="mb-4 flex items-center gap-3 rounded-lg border border-sky-500/30 bg-sky-500/10 px-4 py-3 text-sm text-sky-200">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          Pulling images to Harbor since {formatDateTime(data.mirrorRunning.started_at)}. This keeps running if you leave the page.
+        </div>
+      )}
+      {!data?.mirrorRunning && data?.mirrorLast?.error && (
+        <div className={cn(
+          'mb-4 rounded-lg border px-4 py-3 text-sm',
+          data.mirrorLast.status === 'failed' || data.mirrorLast.failed > 0
+            ? 'border-rose-500/30 bg-rose-500/10 text-rose-200'
+            : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
+        )}>
+          {data.mirrorLast.error}
+          {data.mirrorLast.finished_at && <span className="mt-1 block text-xs opacity-70">{formatDateTime(data.mirrorLast.finished_at)}</span>}
+        </div>
+      )}
 
       {data?.running && (
         <div className="mb-4 flex items-center gap-3 rounded-lg border border-sky-500/30 bg-sky-500/10 px-4 py-3 text-sm text-sky-200">

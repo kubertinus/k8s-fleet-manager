@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getPool, initializeDatabase } from '@/lib/database'
 import { verifyToken } from '@/lib/auth'
 import { displayRepository } from '@/lib/images/reference'
+import { reconcileMirrorRun } from '@/lib/images/mirror-run'
 import { getSchedule, nextRunAt } from '@/lib/images/scheduler'
 
 // Image report: every image in use, its version status and where it is used.
@@ -14,9 +15,10 @@ export async function GET(request: NextRequest) {
 
   try {
     await initializeDatabase()
+    await reconcileMirrorRun()
     const pool = getPool()
 
-    const [usages, versions, clusters, runs, schedule] = await Promise.all([
+    const [usages, versions, clusters, runs, mirrors, schedule] = await Promise.all([
       pool.query(`
         SELECT w.image, w.cluster_id, c.name AS cluster_name, w.namespace, w.kind, w.name, w.container, w.init_container, w.customer_managed
         FROM image_workloads w JOIN clusters c ON c.id = w.cluster_id
@@ -33,6 +35,11 @@ export async function GET(request: NextRequest) {
         (SELECT * FROM image_scan_runs WHERE status = 'running' ORDER BY started_at DESC LIMIT 1)
         UNION ALL
         (SELECT * FROM image_scan_runs WHERE status <> 'running' ORDER BY started_at DESC LIMIT 1)
+      `),
+      pool.query(`
+        (SELECT * FROM image_mirror_runs WHERE status = 'running' ORDER BY started_at DESC LIMIT 1)
+        UNION ALL
+        (SELECT * FROM image_mirror_runs WHERE status <> 'running' ORDER BY started_at DESC LIMIT 1)
       `),
       getSchedule(),
     ])
@@ -91,6 +98,8 @@ export async function GET(request: NextRequest) {
 
     const running = runs.rows.find((r: any) => r.status === 'running') ?? null
     const lastRun = runs.rows.find((r: any) => r.status !== 'running') ?? null
+    const mirrorRunning = mirrors.rows.find((r: any) => r.status === 'running') ?? null
+    const mirrorLast = mirrors.rows.find((r: any) => r.status !== 'running') ?? null
     const next = nextRunAt(schedule)
 
     return NextResponse.json(
@@ -99,6 +108,8 @@ export async function GET(request: NextRequest) {
         clusters: clusters.rows.map((c: any) => ({ id: c.id, name: c.name, scannedAt: c.scanned_at, attemptedAt: c.attempted_at, error: c.error })),
         running,
         lastRun,
+        mirrorRunning,
+        mirrorLast,
         schedule: { ...schedule, nextRunAt: next?.toISOString() ?? null },
         canEditSchedule: user.role === 'admin',
       },

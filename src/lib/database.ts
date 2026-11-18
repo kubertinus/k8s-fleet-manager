@@ -661,6 +661,21 @@ async function runAllMigrations() {
     )
   })
 
+  // Migration 22: A Harbor pull keeps running after the browser request ends
+  await runMigration('add_image_mirror_runs', async () => {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS image_mirror_runs (
+        id SERIAL PRIMARY KEY,
+        status VARCHAR(20) NOT NULL DEFAULT 'running',
+        started_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        finished_at TIMESTAMP WITH TIME ZONE,
+        mirrored INTEGER DEFAULT 0,
+        failed INTEGER DEFAULT 0,
+        error TEXT
+      )
+    `)
+  })
+
   // Future migrations can be added here
   // await runMigration('migration_name', async () => { ... })
 }

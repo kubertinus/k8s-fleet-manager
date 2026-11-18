@@ -299,18 +299,29 @@ export async function mirrorImage(settings: HarborMirrorSettings, image: string)
   }
   const target = `${harborHost(settings.url)}/${settings.targetProject}/${path}`
   const taggedFrom = `${settings.sourceProject}/${path}`
-  const tagged = await copyArtifact(settings, headers, parts.repository, taggedFrom)
-  if (!tagged) return { target }
+  // A 200 from the tag copy is not enough: directpull often has the layers and no tag,
+  // and the copy call can answer without putting anything in the target project.
+  await copyArtifact(settings, headers, parts.repository, taggedFrom, 2)
+  if (await targetHasTag(settings, headers, settings.targetProject, parts.repository, parts.tag)) return { target }
 
-  // Proxy cache often stores the layers without the tag. Copy the digest Harbor has, then tag the target.
   const digest = await cachedDigest(settings, headers, parts.repository, parts.tag, pulled)
-  if (!digest) throw new Error(tagged)
+  if (!digest) throw new Error(`Image is in ${settings.sourceProject} without a tag, and Harbor has no artifact to copy`)
   const from = `${settings.sourceProject}/${parts.repository}@${digest}`
   console.log(`[image-mirror] ${taggedFrom} has no tag in ${settings.sourceProject}, copying ${from}`)
   const copied = await copyArtifact(settings, headers, parts.repository, from, 1)
   if (copied) throw new Error(copied)
   await createTag(settings, headers, settings.targetProject, parts.repository, digest, parts.tag)
+  if (!(await targetHasTag(settings, headers, settings.targetProject, parts.repository, parts.tag))) {
+    throw new Error(`Harbor copy finished without tag ${parts.tag} in ${settings.targetProject}`)
+  }
   return { target }
+}
+
+async function targetHasTag(settings: HarborMirrorSettings, headers: Record<string, string>, project: string, repository: string, tag: string) {
+  const repo = encodeURIComponent(encodeURIComponent(repository))
+  const url = `https://${harborHost(settings.url)}/api/v2.0/projects/${encodeURIComponent(project)}/repositories/${repo}/artifacts/${encodeURIComponent(tag)}`
+  const response = await harborRequest(url, { headers, insecureTls: settings.insecureTls, timeoutMs: 30_000 })
+  return response.status >= 200 && response.status < 300
 }
 
 // null when the copy landed (or was already there). Otherwise the Harbor error.

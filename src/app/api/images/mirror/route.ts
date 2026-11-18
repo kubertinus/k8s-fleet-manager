@@ -1,11 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { verifyToken } from '@/lib/auth'
-import { getPool, initializeDatabase } from '@/lib/database'
-import { loadHarborMirrorSettings, mirrorImage } from '@/lib/images/harbor'
+import { initializeDatabase } from '@/lib/database'
+import { loadHarborMirrorSettings } from '@/lib/images/harbor'
+import { startImageMirror } from '@/lib/images/mirror-run'
 
 const MAX_IMAGES = 200
 
-// Pull the newer version of each selected image into Harbor, one at a time.
+// Start a pull. The copy continues on the server after this response, so a closed
+// browser tab does not stop it. The report page polls image_mirror_runs for the result.
 export async function POST(request: NextRequest) {
   const token = request.cookies.get('auth-token')?.value
   if (!token || !verifyToken(token)) {
@@ -22,39 +24,19 @@ export async function POST(request: NextRequest) {
     }
 
     await initializeDatabase()
-    let settings
     try {
-      settings = await loadHarborMirrorSettings()
+      await loadHarborMirrorSettings()
     } catch (error: any) {
       return NextResponse.json({ error: error?.message || 'Harbor is not configured' }, { status: 400 })
     }
 
-    const unique = Array.from(new Set(images))
-    const versions = await getPool().query(
-      'SELECT image, registry, repository, status, latest_version FROM image_versions WHERE image = ANY($1)',
-      [unique]
-    )
-    const byImage = new Map(versions.rows.map((row: any) => [row.image, row]))
-
-    const failed: { image: string; error: string }[] = []
-    let mirrored = 0
-    for (const image of unique) {
-      const row = byImage.get(image)
-      if (!row || row.status !== 'update' || !row.latest_version) continue
-      const tagged = `${row.registry}/${row.repository}:${row.latest_version}`
-      try {
-        const result = await mirrorImage(settings, tagged)
-        mirrored++
-        console.log(`[image-mirror] ${tagged} -> ${result.target}`)
-      } catch (error: any) {
-        failed.push({ image, error: error?.message || 'Mirror failed' })
-        console.error(`[image-mirror] ${tagged} failed:`, error?.message || error)
-      }
+    const runId = await startImageMirror(images)
+    if (runId === null) {
+      return NextResponse.json({ error: 'A pull is already running' }, { status: 409 })
     }
-
-    return NextResponse.json({ mirrored, failed })
+    return NextResponse.json({ runId }, { status: 202 })
   } catch (error) {
-    console.error('Error mirroring images:', error)
+    console.error('Error starting image mirror:', error)
     return NextResponse.json({ error: 'Failed to pull images to Harbor' }, { status: 500 })
   }
 }
