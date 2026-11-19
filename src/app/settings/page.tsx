@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { MessageCircle, AlertTriangle, Users, Server, Shield, Sparkles, Network, Package, History } from 'lucide-react'
+import { MessageCircle, AlertTriangle, Users, Server, Shield, Sparkles, Network, Package, History, Anchor } from 'lucide-react'
 import AppShell from '@/components/layout/AppShell'
 
 interface User {
@@ -98,6 +98,17 @@ export default function SettingsPage() {
     nexus_password: ''
   })
 
+  const [harborSettings, setHarborSettings] = useState({
+    harbor_enabled: 'false',
+    harbor_url: '',
+    harbor_username: '',
+    harbor_password: '',
+    harbor_project: 'proxy-cache',
+    harbor_mirror_source_project: 'directpull',
+    harbor_mirror_target_project: 'managed_nexus',
+    harbor_allow_insecure_tls: 'false'
+  })
+
   // Health history settings state
   const [historySettings, setHistorySettings] = useState({
     history_interval_minutes: '5',
@@ -148,6 +159,7 @@ export default function SettingsPage() {
         const ollamaSettingsObj: any = {}
         const antreaSettingsObj: any = {}
         const nexusSettingsObj: any = {}
+        const harborSettingsObj: any = {}
         const aiPromptSettingsObj: any = {}
         const historySettingsObj: any = {}
         settingsData.settings.forEach((setting: Setting) => {
@@ -163,6 +175,9 @@ export default function SettingsPage() {
           if (setting.key.startsWith('nexus_')) {
             nexusSettingsObj[setting.key] = setting.value
           }
+          if (setting.key.startsWith('harbor_')) {
+            harborSettingsObj[setting.key] = setting.value
+          }
           if (setting.key.startsWith('history_')) {
             historySettingsObj[setting.key] = setting.value
           }
@@ -174,6 +189,7 @@ export default function SettingsPage() {
         setOllamaSettings(prev => ({ ...prev, ...ollamaSettingsObj }))
         setAntreaSettings(prev => ({ ...prev, ...antreaSettingsObj }))
         setNexusSettings(prev => ({ ...prev, ...nexusSettingsObj }))
+        setHarborSettings(prev => ({ ...prev, ...harborSettingsObj }))
         setAiPromptSettings(prev => ({ ...prev, ...aiPromptSettingsObj }))
         setHistorySettings(prev => ({ ...prev, ...historySettingsObj }))
       }
@@ -431,6 +447,32 @@ export default function SettingsPage() {
     }
   }
 
+  const handleUpdateHarborSettings = async (e: React.FormEvent) => {
+    e.preventDefault()
+    try {
+      const settingsArray = Object.entries(harborSettings).map(([key, value]) => ({
+        key,
+        value
+      }))
+
+      const response = await fetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ settings: settingsArray })
+      })
+
+      if (response.ok) {
+        setError('')
+        alert('Harbor settings updated successfully')
+      } else {
+        const data = await response.json()
+        setError(data.error || 'Failed to update settings')
+      }
+    } catch (error) {
+      setError('Failed to update settings')
+    }
+  }
+
   const handleUpdateHistorySettings = async (e: React.FormEvent) => {
     e.preventDefault()
     const interval = Number(historySettings.history_interval_minutes)
@@ -478,6 +520,7 @@ export default function SettingsPage() {
     { id: 'ai-prompts-settings', label: 'AI Prompts', icon: MessageCircle },
     { id: 'antrea-settings', label: 'Antrea Flow', icon: Network },
     { id: 'nexus-settings', label: 'Nexus Updates', icon: Package },
+    { id: 'harbor-settings', label: 'Harbor', icon: Anchor },
     { id: 'history-settings', label: 'Health History', icon: History }
   ]
 
@@ -1375,6 +1418,157 @@ export default function SettingsPage() {
 
                 <Button type="submit" className="w-full">
                   Save Nexus Settings
+                </Button>
+              </form>
+            </CardContent>
+          </Card>
+
+          <Card id="harbor-settings" className="scroll-mt-24 border-slate-200 shadow-sm mt-6">
+            <CardHeader>
+              <CardTitle className="flex items-center space-x-2">
+                <Anchor className="h-5 w-5 text-slate-700" />
+                <span>Harbor</span>
+              </CardTitle>
+              <CardDescription>
+                Harbor registry for CVE scores and for pulling a newer image into the registry. The URL is the host, for example harbor.example.com.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <form onSubmit={handleUpdateHarborSettings} className="space-y-6">
+                <div>
+                  <label className="flex items-center gap-2 text-sm font-medium text-gray-700">
+                    <input
+                      type="checkbox"
+                      checked={harborSettings.harbor_enabled === 'true'}
+                      onChange={(e) => setHarborSettings({
+                        ...harborSettings,
+                        harbor_enabled: e.target.checked ? 'true' : 'false'
+                      })}
+                    />
+                    Enable Harbor CVE scores
+                  </label>
+                  <p className="text-xs text-gray-500 mt-1">
+                    When on, the image scan reads the Trivy report Harbor already stored. Pulling an image does not need this switch, only the URL and login below.
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Harbor URL
+                  </label>
+                  <Input
+                    type="text"
+                    value={harborSettings.harbor_url}
+                    onChange={(e) => setHarborSettings({
+                      ...harborSettings,
+                      harbor_url: e.target.value
+                    })}
+                    placeholder="harbor.example.com"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Harbor Username
+                    </label>
+                    <Input
+                      type="text"
+                      value={harborSettings.harbor_username}
+                      onChange={(e) => setHarborSettings({
+                        ...harborSettings,
+                        harbor_username: e.target.value
+                      })}
+                      placeholder="harbor-user"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Harbor Password
+                    </label>
+                    <Input
+                      type="password"
+                      value={harborSettings.harbor_password}
+                      onChange={(e) => setHarborSettings({
+                        ...harborSettings,
+                        harbor_password: e.target.value
+                      })}
+                      placeholder="••••••••"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="flex items-center gap-2 text-sm font-medium text-gray-700">
+                    <input
+                      type="checkbox"
+                      checked={harborSettings.harbor_allow_insecure_tls === 'true'}
+                      onChange={(e) => setHarborSettings({
+                        ...harborSettings,
+                        harbor_allow_insecure_tls: e.target.checked ? 'true' : 'false'
+                      })}
+                    />
+                    Allow insecure TLS for Harbor
+                  </label>
+                  <p className="text-xs text-gray-500 mt-1">
+                    Use only for a self-signed or untrusted Harbor certificate. Applies to CVE lookup and Pull to Harbor.
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    CVE project
+                  </label>
+                  <Input
+                    type="text"
+                    value={harborSettings.harbor_project}
+                    onChange={(e) => setHarborSettings({
+                      ...harborSettings,
+                      harbor_project: e.target.value
+                    })}
+                    placeholder="proxy-cache"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    Project used to look up an existing Trivy scan. Images that already live on this Harbor host use the project in their own path.
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Pull source project
+                    </label>
+                    <Input
+                      type="text"
+                      value={harborSettings.harbor_mirror_source_project}
+                      onChange={(e) => setHarborSettings({
+                        ...harborSettings,
+                        harbor_mirror_source_project: e.target.value
+                      })}
+                      placeholder="directpull"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Pull target project
+                    </label>
+                    <Input
+                      type="text"
+                      value={harborSettings.harbor_mirror_target_project}
+                      onChange={(e) => setHarborSettings({
+                        ...harborSettings,
+                        harbor_mirror_target_project: e.target.value
+                      })}
+                      placeholder="managed_nexus"
+                    />
+                  </div>
+                </div>
+                <p className="text-xs text-gray-500 -mt-3">
+                  Pull to Harbor fetches the newer tag through the source project and copies it into the target project.
+                </p>
+
+                <Button type="submit" className="w-full">
+                  Save Harbor Settings
                 </Button>
               </form>
             </CardContent>

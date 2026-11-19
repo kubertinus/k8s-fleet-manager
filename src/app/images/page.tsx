@@ -1,8 +1,8 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { AlertTriangle, CalendarClock, Layers, Loader2, Package, RotateCw, ScanSearch, Search } from 'lucide-react'
+import { AlertTriangle, CalendarClock, Download, Layers, Loader2, Package, RotateCw, ScanSearch, Search } from 'lucide-react'
 import AppShell from '@/components/layout/AppShell'
 import ImageTable, { type ImageRow } from '@/components/images/ImageTable'
 import WorkloadTable, { type WorkloadRow } from '@/components/images/WorkloadTable'
@@ -10,6 +10,8 @@ import SchedulePanel from '@/components/images/SchedulePanel'
 import {
   formatDateTime,
   matchesStatus,
+  pullableTags,
+  pullKey,
   relativeTime,
   statusRank,
   type ImageReportData,
@@ -54,7 +56,9 @@ export default function ImagesPage() {
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [pulls, setPulls] = useState<Set<string>>(new Set())
   const [rechecking, setRechecking] = useState(false)
+  const [mirroring, setMirroring] = useState(false)
   const [starting, setStarting] = useState(false)
   const [showSchedule, setShowSchedule] = useState(false)
 
@@ -91,13 +95,29 @@ export default function ImagesPage() {
     }
   }, [load])
 
-  // Follow a running scan until it finishes
+  // Follow a running scan or Harbor pull until it finishes. The result is stored
+  // with the run, so a refresh still shows it.
   const running = !!data?.running
+  const mirrorRunning = !!data?.mirrorRunning
   useEffect(() => {
-    if (!running) return
+    if (!running && !mirrorRunning) return
     const interval = setInterval(load, POLL_WHILE_RUNNING_MS)
     return () => clearInterval(interval)
-  }, [running, load])
+  }, [running, mirrorRunning, load])
+
+  // A pull that was already finished when the page opened must not clear a new selection.
+  const mirrorSeen = useRef<number | null>(null)
+  useEffect(() => {
+    if (!data) return
+    if (mirrorSeen.current === null) {
+      mirrorSeen.current = data.mirrorLast?.id ?? 0
+      return
+    }
+    const last = data.mirrorLast
+    if (!last || data.mirrorRunning || last.id === mirrorSeen.current) return
+    mirrorSeen.current = last.id
+    if (last.status === 'completed' && last.failed === 0) setPulls(new Set())
+  }, [data])
 
   const changeView = (next: View) => {
     setView(next)
@@ -142,6 +162,38 @@ export default function ImagesPage() {
       setError(err.message)
     } finally {
       setRechecking(false)
+    }
+  }
+
+  const pullSelection = useMemo(() => {
+    const items: { image: string; tag: string }[] = []
+    for (const image of data?.images ?? []) {
+      for (const tag of pullableTags(image)) {
+        if (pulls.has(pullKey(image.image, tag))) items.push({ image: image.image, tag })
+      }
+    }
+    return items
+  }, [data, pulls])
+
+  const pullBusy = mirroring || !!data?.mirrorRunning
+
+  const mirror = async () => {
+    setMirroring(true)
+    setError(null)
+    try {
+      const response = await fetch('/api/images/mirror', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pulls: pullSelection }),
+      })
+      const body = await response.json().catch(() => ({}))
+      if (response.status === 409) throw new Error(body.error || 'A pull is already running')
+      if (!response.ok) throw new Error(body.error || 'Pull to Harbor failed')
+      await load()
+    } catch (err: any) {
+      setError(err.message)
+    } finally {
+      setMirroring(false)
     }
   }
 
@@ -226,6 +278,15 @@ export default function ImagesPage() {
       return next
     })
 
+  const togglePull = (image: string, tag: string) =>
+    setPulls(prev => {
+      const next = new Set(prev)
+      const key = pullKey(image, tag)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+
   const visibleImages = imageRows.map(r => r.image.image)
   const toggleAll = () =>
     setSelected(prev => {
@@ -261,8 +322,14 @@ export default function ImagesPage() {
       }
       actions={
         <>
+          {pullSelection.length > 0 && (
+            <button onClick={mirror} disabled={pullBusy || rechecking} className="btn-secondary">
+              {pullBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+              <span className="hidden sm:inline">{pullBusy ? 'Pulling…' : `Pull ${pullSelection.length} to Harbor`}</span>
+            </button>
+          )}
           {selected.size > 0 && (
-            <button onClick={recheck} disabled={rechecking} className="btn-secondary">
+            <button onClick={recheck} disabled={rechecking || pullBusy} className="btn-secondary">
               <RotateCw className={cn('h-4 w-4', rechecking && 'animate-spin')} />
               <span className="hidden sm:inline">{rechecking ? 'Checking…' : `Re-check ${selected.size} selected`}</span>
             </button>
@@ -280,6 +347,24 @@ export default function ImagesPage() {
     >
       {error && <div className="mb-4 rounded-lg border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">{error}</div>}
       {notice && <div className="mb-4 rounded-lg border border-slate-700 bg-slate-900 px-4 py-3 text-sm text-slate-300">{notice}</div>}
+
+      {data?.mirrorRunning && (
+        <div className="mb-4 flex items-center gap-3 rounded-lg border border-sky-500/30 bg-sky-500/10 px-4 py-3 text-sm text-sky-200">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          Pulling images to Harbor since {formatDateTime(data.mirrorRunning.started_at)}. This keeps running if you leave the page.
+        </div>
+      )}
+      {!data?.mirrorRunning && data?.mirrorLast?.error && (
+        <div className={cn(
+          'mb-4 rounded-lg border px-4 py-3 text-sm',
+          data.mirrorLast.status === 'failed' || data.mirrorLast.failed > 0
+            ? 'border-rose-500/30 bg-rose-500/10 text-rose-200'
+            : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
+        )}>
+          {data.mirrorLast.error}
+          {data.mirrorLast.finished_at && <span className="mt-1 block text-xs opacity-70">{formatDateTime(data.mirrorLast.finished_at)}</span>}
+        </div>
+      )}
 
       {data?.running && (
         <div className="mb-4 flex items-center gap-3 rounded-lg border border-sky-500/30 bg-sky-500/10 px-4 py-3 text-sm text-sky-200">
@@ -391,15 +476,16 @@ export default function ImagesPage() {
             {imageRows.length === 0 ? (
               <p className="py-12 text-center text-sm text-slate-500">No images match these filters.</p>
             ) : view === 'images' ? (
-              <ImageTable rows={imageRows} selected={selected} onToggle={toggle} onToggleAll={toggleAll} />
+              <ImageTable rows={imageRows} selected={selected} pulls={pulls} onToggle={toggle} onToggleAll={toggleAll} onTogglePull={togglePull} />
             ) : (
-              <WorkloadTable rows={workloadRows} selected={selected} onToggle={toggle} onToggleAll={toggleAll} />
+              <WorkloadTable rows={workloadRows} selected={selected} pulls={pulls} onToggle={toggle} onToggleAll={toggleAll} onTogglePull={togglePull} />
             )}
 
             <p className="mt-3 text-xs text-slate-500">
               {view === 'images' ? `${imageRows.length} images` : `${workloadRows.length} containers`}
               {data.lastRun && <> · inventory from {relativeTime(data.lastRun.finished_at ?? data.lastRun.started_at)}</>}
               {selected.size > 0 && <> · {selected.size} selected</>}
+              {pullSelection.length > 0 && <> · {pullSelection.length} to pull</>}
             </p>
           </>
         )

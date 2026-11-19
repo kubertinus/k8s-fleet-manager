@@ -1,5 +1,6 @@
 export type ImageStatus = 'update' | 'current' | 'unversioned' | 'pinned' | 'error' | 'pending'
 export type UpdateType = 'major' | 'minor' | 'patch'
+export type CveSeverity = 'None' | 'Unknown' | 'Low' | 'Medium' | 'High' | 'Critical'
 
 export interface ImageUsage {
   clusterId: number
@@ -26,6 +27,15 @@ export interface ReportImage {
   source: 'nexus' | 'online' | null
   error: string | null
   checkedAt: string | null
+  cveSeverity: CveSeverity | null
+  cveCritical: number | null
+  cveHigh: number | null
+  cveMedium: number | null
+  cveLow: number | null
+  cveTotal: number | null
+  cveFixable: number | null
+  cveScannedAt: string | null
+  cveError: string | null
   usages: ImageUsage[]
 }
 
@@ -57,11 +67,23 @@ export interface Schedule {
   nextRunAt: string | null
 }
 
+export interface MirrorRun {
+  id: number
+  status: 'running' | 'completed' | 'failed'
+  started_at: string
+  finished_at: string | null
+  mirrored: number
+  failed: number
+  error: string | null
+}
+
 export interface ImageReportData {
   images: ReportImage[]
   clusters: ClusterScan[]
   running: ScanRun | null
   lastRun: ScanRun | null
+  mirrorRunning: MirrorRun | null
+  mirrorLast: MirrorRun | null
   schedule: Schedule
   canEditSchedule: boolean
 }
@@ -72,6 +94,17 @@ export type StatusFilter = 'all' | 'update' | 'current' | 'other' | 'error'
 export function statusRank(image: ReportImage) {
   if (image.status === 'update') return image.updateType === 'major' ? 0 : image.updateType === 'minor' ? 1 : 2
   return { error: 3, pending: 4, unversioned: 5, pinned: 6, current: 7, update: 0 }[image.status]
+}
+
+// One selectable pull: the newest tag, and for a major jump also the newest tag in the current major.
+export function pullableTags(image: Pick<ReportImage, 'status' | 'latestVersion' | 'latestInMajor'>): string[] {
+  if (image.status !== 'update' || !image.latestVersion) return []
+  if (!image.latestInMajor || image.latestInMajor === image.latestVersion) return [image.latestVersion]
+  return [image.latestVersion, image.latestInMajor]
+}
+
+export function pullKey(image: string, tag: string) {
+  return `${image}\n${tag}`
 }
 
 export function matchesStatus(image: ReportImage, filter: StatusFilter) {
@@ -87,6 +120,20 @@ export function matchesStatus(image: ReportImage, filter: StatusFilter) {
     default:
       return true
   }
+}
+
+// "2C · 5H": only the severities that actually occur.
+export function cveCountLabel(image: Pick<ReportImage, 'cveCritical' | 'cveHigh' | 'cveMedium' | 'cveLow'>) {
+  const parts: [number | null, string][] = [
+    [image.cveCritical, 'C'],
+    [image.cveHigh, 'H'],
+    [image.cveMedium, 'M'],
+    [image.cveLow, 'L'],
+  ]
+  return parts
+    .filter((part): part is [number, string] => typeof part[0] === 'number' && part[0] > 0)
+    .map(([count, letter]) => `${count}${letter}`)
+    .join(' · ')
 }
 
 export function relativeTime(iso: string | null | undefined) {

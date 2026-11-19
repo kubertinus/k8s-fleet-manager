@@ -615,6 +615,67 @@ async function runAllMigrations() {
     `, ['keycloak_allow_insecure_tls', 'false', 'Accept an untrusted TLS certificate from Keycloak (prefer trusting the CA via NODE_EXTRA_CA_CERTS)'])
   })
 
+  // Migration 19: Trivy severity and counts from the Harbor scan overview
+  await runMigration('add_image_cve_summary', async () => {
+    await pool.query(`
+      ALTER TABLE image_versions
+        ADD COLUMN IF NOT EXISTS cve_severity VARCHAR(20),
+        ADD COLUMN IF NOT EXISTS cve_critical INTEGER,
+        ADD COLUMN IF NOT EXISTS cve_high INTEGER,
+        ADD COLUMN IF NOT EXISTS cve_medium INTEGER,
+        ADD COLUMN IF NOT EXISTS cve_low INTEGER,
+        ADD COLUMN IF NOT EXISTS cve_total INTEGER,
+        ADD COLUMN IF NOT EXISTS cve_fixable INTEGER,
+        ADD COLUMN IF NOT EXISTS cve_scanned_at TIMESTAMP WITH TIME ZONE,
+        ADD COLUMN IF NOT EXISTS cve_error TEXT
+    `)
+  })
+
+  // Migration 20: Harbor projects used when pulling a newer image into the registry
+  await runMigration('add_harbor_mirror_projects', async () => {
+    const mirrorSettings = [
+      {
+        key: 'harbor_mirror_source_project',
+        value: 'directpull',
+        description: 'Harbor project to pull a newer image through (proxy cache)',
+      },
+      {
+        key: 'harbor_mirror_target_project',
+        value: 'managed_nexus',
+        description: 'Harbor project that receives the pulled image',
+      },
+    ]
+    for (const setting of mirrorSettings) {
+      await pool.query(
+        `INSERT INTO settings (key, value, description) VALUES ($1, $2, $3) ON CONFLICT (key) DO NOTHING`,
+        [setting.key, setting.value, setting.description]
+      )
+    }
+  })
+
+  // Migration 21: Accept an untrusted certificate from Harbor
+  await runMigration('add_harbor_tls_setting', async () => {
+    await pool.query(
+      `INSERT INTO settings (key, value, description) VALUES ($1, $2, $3) ON CONFLICT (key) DO NOTHING`,
+      ['harbor_allow_insecure_tls', 'false', 'Accept an untrusted TLS certificate from Harbor (prefer trusting the CA via NODE_EXTRA_CA_CERTS)']
+    )
+  })
+
+  // Migration 22: A Harbor pull keeps running after the browser request ends
+  await runMigration('add_image_mirror_runs', async () => {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS image_mirror_runs (
+        id SERIAL PRIMARY KEY,
+        status VARCHAR(20) NOT NULL DEFAULT 'running',
+        started_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        finished_at TIMESTAMP WITH TIME ZONE,
+        mirrored INTEGER DEFAULT 0,
+        failed INTEGER DEFAULT 0,
+        error TEXT
+      )
+    `)
+  })
+
   // Future migrations can be added here
   // await runMigration('migration_name', async () => { ... })
 }

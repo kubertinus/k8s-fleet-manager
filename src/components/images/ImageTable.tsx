@@ -1,10 +1,10 @@
 'use client'
 
 import { Fragment, useState } from 'react'
-import { ArrowRight, ChevronDown, ChevronRight } from 'lucide-react'
+import { ChevronDown, ChevronRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import ImageStatusBadge from './ImageStatusBadge'
-import { relativeTime, type ImageUsage, type ReportImage } from './types'
+import { cveCountLabel, formatDateTime, pullableTags, pullKey, relativeTime, type ImageUsage, type ReportImage } from './types'
 
 export interface ImageRow {
   image: ReportImage
@@ -26,33 +26,98 @@ export function CurrentVersion({ image }: { image: ReportImage }) {
   )
 }
 
-export function AvailableVersion({ image }: { image: ReportImage }) {
-  if (image.status !== 'update' || !image.latestVersion) return <span className="text-slate-600">—</span>
+const cveBadge: Record<string, string> = {
+  Critical: 'badge-err',
+  High: 'bg-orange-500/15 text-orange-300',
+  Medium: 'badge-warn',
+  Low: 'badge-muted',
+  None: 'badge-ok',
+  Unknown: 'badge-muted',
+}
+
+export function CveScore({ image }: { image: ReportImage }) {
+  if (image.cveError) {
+    return (
+      <span className="badge badge-err" title={image.cveError}>
+        CVE failed
+      </span>
+    )
+  }
+  if (!image.cveSeverity) return <span className="text-slate-600">—</span>
+  const counts = cveCountLabel(image)
+  const scanned = image.cveScannedAt ? `scanned ${formatDateTime(image.cveScannedAt)}` : null
+  const tip = [`${image.cveTotal ?? 0} vulnerabilities, ${image.cveFixable ?? 0} fixable`, scanned].filter(Boolean).join(' · ')
+  return (
+    <span className="inline-flex items-center gap-1.5" title={tip}>
+      <span className={cn('badge', cveBadge[image.cveSeverity] ?? 'badge-muted')}>{image.cveSeverity}</span>
+      {counts && <span className="whitespace-nowrap font-mono text-[11px] text-slate-400">{counts}</span>}
+    </span>
+  )
+}
+
+export function AvailableVersion({
+  image,
+  pulls,
+  onTogglePull,
+}: {
+  image: ReportImage
+  pulls: Set<string>
+  onTogglePull: (image: string, tag: string) => void
+}) {
+  const tags = pullableTags(image)
+  if (tags.length === 0 || !image.latestVersion) return <span className="text-slate-600">—</span>
   const major = image.tag?.replace(/^v/, '').split('.')[0]
   return (
-    <span className="inline-flex max-w-[11rem] flex-col">
-      <span className="inline-flex items-center gap-1.5 whitespace-nowrap font-mono text-xs text-white" title={image.latestVersion}>
-        <ArrowRight className="h-3 w-3 flex-shrink-0 text-slate-500" />
-        <span className="truncate">{image.latestVersion}</span>
-      </span>
-      {image.latestInMajor && (
-        <span
-          className="truncate whitespace-nowrap pl-[1.125rem] font-mono text-[11px] text-slate-400"
-          title={`Newest version without changing major version: ${image.latestInMajor}`}
+    <span className="inline-flex max-w-[14rem] flex-col gap-1">
+      <label className="inline-flex items-center gap-1.5" title={`Pull ${image.latestVersion}`} onClick={event => event.stopPropagation()}>
+        <Checkbox
+          checked={pulls.has(pullKey(image.image, image.latestVersion))}
+          onChange={() => onTogglePull(image.image, image.latestVersion)}
+          label={`Pull ${image.name} ${image.latestVersion}`}
+          className="h-3.5 w-3.5"
+        />
+        <span className="truncate font-mono text-xs text-white">{image.latestVersion}</span>
+      </label>
+      {image.latestInMajor && image.latestInMajor !== image.latestVersion && (
+        <label
+          className="inline-flex items-center gap-1.5"
+          title={`Pull ${image.latestInMajor}, the newest ${major ?? 'current'}.x release`}
+          onClick={event => event.stopPropagation()}
         >
-          {major}.x: {image.latestInMajor}
-        </span>
+          <Checkbox
+            checked={pulls.has(pullKey(image.image, image.latestInMajor))}
+            onChange={() => onTogglePull(image.image, image.latestInMajor!)}
+            label={`Pull ${image.name} ${image.latestInMajor}`}
+            className="h-3.5 w-3.5"
+          />
+          <span className="truncate font-mono text-[11px] text-slate-400">
+            {major ? `${major}.x: ` : ''}
+            {image.latestInMajor}
+          </span>
+        </label>
       )}
     </span>
   )
 }
 
-export function Checkbox({ checked, indeterminate, onChange, label }: { checked: boolean; indeterminate?: boolean; onChange: () => void; label: string }) {
+export function Checkbox({
+  checked,
+  indeterminate,
+  onChange,
+  label,
+  className,
+}: {
+  checked: boolean
+  indeterminate?: boolean
+  onChange: () => void
+  label: string
+  className?: string
+}) {
   return (
     <input
       type="checkbox"
       aria-label={label}
-      className="h-4 w-4 cursor-pointer rounded border-slate-600 bg-slate-950 accent-orange-600"
+      className={cn('h-4 w-4 cursor-pointer rounded border-slate-600 bg-slate-950 accent-orange-600', className)}
       checked={checked}
       ref={el => {
         if (el) el.indeterminate = !!indeterminate && !checked
@@ -74,13 +139,17 @@ function usageSummary(usages: ImageUsage[]) {
 export default function ImageTable({
   rows,
   selected,
+  pulls,
   onToggle,
   onToggleAll,
+  onTogglePull,
 }: {
   rows: ImageRow[]
   selected: Set<string>
+  pulls: Set<string>
   onToggle: (image: string) => void
   onToggleAll: () => void
+  onTogglePull: (image: string, tag: string) => void
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const toggleExpanded = (image: string) =>
@@ -96,7 +165,7 @@ export default function ImageTable({
 
   return (
     <div className="card overflow-x-auto">
-      <table className="w-full min-w-[860px] text-sm">
+      <table className="w-full min-w-[980px] text-sm">
         <thead>
           <tr className="border-b border-slate-800 text-left text-[11px] uppercase tracking-wider text-slate-500">
             <th className="w-10 px-4 py-2.5">
@@ -106,6 +175,7 @@ export default function ImageTable({
             <th className="px-3 py-2.5 font-medium">Current</th>
             <th className="px-3 py-2.5 font-medium">Available</th>
             <th className="px-3 py-2.5 font-medium">Status</th>
+            <th className="px-3 py-2.5 font-medium">CVE</th>
             <th className="px-3 py-2.5 font-medium">Source</th>
             <th className="px-3 py-2.5 font-medium">Used by</th>
             <th className="px-4 py-2.5 text-right font-medium">Checked</th>
@@ -135,10 +205,13 @@ export default function ImageTable({
                     <CurrentVersion image={image} />
                   </td>
                   <td className="px-3 py-2.5">
-                    <AvailableVersion image={image} />
+                    <AvailableVersion image={image} pulls={pulls} onTogglePull={onTogglePull} />
                   </td>
                   <td className="px-3 py-2.5">
                     <ImageStatusBadge image={image} />
+                  </td>
+                  <td className="px-3 py-2.5">
+                    <CveScore image={image} />
                   </td>
                   <td className="px-3 py-2.5 text-xs text-slate-400">{image.source === 'nexus' ? 'Nexus' : image.source === 'online' ? 'Online' : '—'}</td>
                   <td className="whitespace-nowrap px-3 py-2.5 text-xs text-slate-300" title={Array.from(new Set(usages.map(u => u.clusterName))).join(', ')}>
@@ -151,8 +224,9 @@ export default function ImageTable({
                 {isOpen && (
                   <tr className="bg-slate-950/50">
                     <td />
-                    <td colSpan={7} className="px-3 pb-3 pt-1">
+                    <td colSpan={8} className="px-3 pb-3 pt-1">
                       {image.error && <p className="mb-2 text-xs text-rose-300">Check failed: {image.error}</p>}
+                      {image.cveError && <p className="mb-2 text-xs text-rose-300">CVE check failed: {image.cveError}</p>}
                       <p className="mb-2 break-all font-mono text-[11px] text-slate-500">{image.image}</p>
                       <table className="w-full text-xs">
                         <thead>
