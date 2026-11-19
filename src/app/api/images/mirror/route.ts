@@ -2,9 +2,24 @@ import { NextRequest, NextResponse } from 'next/server'
 import { verifyToken } from '@/lib/auth'
 import { initializeDatabase } from '@/lib/database'
 import { loadHarborMirrorSettings } from '@/lib/images/harbor'
-import { startImageMirror } from '@/lib/images/mirror-run'
+import { startImageMirror, type MirrorPull } from '@/lib/images/mirror-run'
+import { isVersionTag } from '@/lib/images/versions'
 
-const MAX_IMAGES = 200
+const MAX_PULLS = 400
+
+function parsePulls(body: unknown): MirrorPull[] | null {
+  const pulls = (body as { pulls?: unknown })?.pulls
+  if (!Array.isArray(pulls) || pulls.length === 0) return null
+  const parsed: MirrorPull[] = []
+  for (const item of pulls) {
+    const image = (item as { image?: unknown })?.image
+    const tag = (item as { tag?: unknown })?.tag
+    if (typeof image !== 'string' || !image || image.length > 500) return null
+    if (typeof tag !== 'string' || !isVersionTag(tag)) return null
+    parsed.push({ image, tag })
+  }
+  return parsed
+}
 
 // Start a pull. The copy continues on the server after this response, so a closed
 // browser tab does not stop it. The report page polls image_mirror_runs for the result.
@@ -15,12 +30,12 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const { images } = await request.json()
-    if (!Array.isArray(images) || images.length === 0 || !images.every(image => typeof image === 'string')) {
-      return NextResponse.json({ error: 'Expected a non-empty list of images' }, { status: 400 })
+    const pulls = parsePulls(await request.json())
+    if (!pulls) {
+      return NextResponse.json({ error: 'Expected a non-empty list of image versions' }, { status: 400 })
     }
-    if (images.length > MAX_IMAGES) {
-      return NextResponse.json({ error: `At most ${MAX_IMAGES} images at once` }, { status: 400 })
+    if (pulls.length > MAX_PULLS) {
+      return NextResponse.json({ error: `At most ${MAX_PULLS} versions at once` }, { status: 400 })
     }
 
     await initializeDatabase()
@@ -30,7 +45,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: error?.message || 'Harbor is not configured' }, { status: 400 })
     }
 
-    const runId = await startImageMirror(images)
+    const runId = await startImageMirror(pulls)
     if (runId === null) {
       return NextResponse.json({ error: 'A pull is already running' }, { status: 409 })
     }

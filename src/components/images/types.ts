@@ -96,6 +96,17 @@ export function statusRank(image: ReportImage) {
   return { error: 3, pending: 4, unversioned: 5, pinned: 6, current: 7, update: 0 }[image.status]
 }
 
+// One selectable pull: the newest tag, and for a major jump also the newest tag in the current major.
+export function pullableTags(image: Pick<ReportImage, 'status' | 'latestVersion' | 'latestInMajor'>): string[] {
+  if (image.status !== 'update' || !image.latestVersion) return []
+  if (!image.latestInMajor || image.latestInMajor === image.latestVersion) return [image.latestVersion]
+  return [image.latestVersion, image.latestInMajor]
+}
+
+export function pullKey(image: string, tag: string) {
+  return `${image}\n${tag}`
+}
+
 export function matchesStatus(image: ReportImage, filter: StatusFilter) {
   switch (filter) {
     case 'update':

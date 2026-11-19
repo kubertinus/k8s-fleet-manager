@@ -10,6 +10,8 @@ import SchedulePanel from '@/components/images/SchedulePanel'
 import {
   formatDateTime,
   matchesStatus,
+  pullableTags,
+  pullKey,
   relativeTime,
   statusRank,
   type ImageReportData,
@@ -54,6 +56,7 @@ export default function ImagesPage() {
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [pulls, setPulls] = useState<Set<string>>(new Set())
   const [rechecking, setRechecking] = useState(false)
   const [mirroring, setMirroring] = useState(false)
   const [starting, setStarting] = useState(false)
@@ -113,7 +116,7 @@ export default function ImagesPage() {
     const last = data.mirrorLast
     if (!last || data.mirrorRunning || last.id === mirrorSeen.current) return
     mirrorSeen.current = last.id
-    if (last.status === 'completed' && last.failed === 0) setSelected(new Set())
+    if (last.status === 'completed' && last.failed === 0) setPulls(new Set())
   }, [data])
 
   const changeView = (next: View) => {
@@ -162,10 +165,15 @@ export default function ImagesPage() {
     }
   }
 
-  const selectedUpdates = useMemo(
-    () => (data?.images ?? []).filter(image => selected.has(image.image) && image.status === 'update' && image.latestVersion),
-    [data, selected]
-  )
+  const pullSelection = useMemo(() => {
+    const items: { image: string; tag: string }[] = []
+    for (const image of data?.images ?? []) {
+      for (const tag of pullableTags(image)) {
+        if (pulls.has(pullKey(image.image, tag))) items.push({ image: image.image, tag })
+      }
+    }
+    return items
+  }, [data, pulls])
 
   const pullBusy = mirroring || !!data?.mirrorRunning
 
@@ -176,7 +184,7 @@ export default function ImagesPage() {
       const response = await fetch('/api/images/mirror', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ images: selectedUpdates.map(image => image.image) }),
+        body: JSON.stringify({ pulls: pullSelection }),
       })
       const body = await response.json().catch(() => ({}))
       if (response.status === 409) throw new Error(body.error || 'A pull is already running')
@@ -270,6 +278,15 @@ export default function ImagesPage() {
       return next
     })
 
+  const togglePull = (image: string, tag: string) =>
+    setPulls(prev => {
+      const next = new Set(prev)
+      const key = pullKey(image, tag)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+
   const visibleImages = imageRows.map(r => r.image.image)
   const toggleAll = () =>
     setSelected(prev => {
@@ -305,10 +322,10 @@ export default function ImagesPage() {
       }
       actions={
         <>
-          {selectedUpdates.length > 0 && (
+          {pullSelection.length > 0 && (
             <button onClick={mirror} disabled={pullBusy || rechecking} className="btn-secondary">
               {pullBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-              <span className="hidden sm:inline">{pullBusy ? 'Pulling…' : `Pull ${selectedUpdates.length} to Harbor`}</span>
+              <span className="hidden sm:inline">{pullBusy ? 'Pulling…' : `Pull ${pullSelection.length} to Harbor`}</span>
             </button>
           )}
           {selected.size > 0 && (
@@ -459,15 +476,16 @@ export default function ImagesPage() {
             {imageRows.length === 0 ? (
               <p className="py-12 text-center text-sm text-slate-500">No images match these filters.</p>
             ) : view === 'images' ? (
-              <ImageTable rows={imageRows} selected={selected} onToggle={toggle} onToggleAll={toggleAll} />
+              <ImageTable rows={imageRows} selected={selected} pulls={pulls} onToggle={toggle} onToggleAll={toggleAll} onTogglePull={togglePull} />
             ) : (
-              <WorkloadTable rows={workloadRows} selected={selected} onToggle={toggle} onToggleAll={toggleAll} />
+              <WorkloadTable rows={workloadRows} selected={selected} pulls={pulls} onToggle={toggle} onToggleAll={toggleAll} onTogglePull={togglePull} />
             )}
 
             <p className="mt-3 text-xs text-slate-500">
               {view === 'images' ? `${imageRows.length} images` : `${workloadRows.length} containers`}
               {data.lastRun && <> · inventory from {relativeTime(data.lastRun.finished_at ?? data.lastRun.started_at)}</>}
               {selected.size > 0 && <> · {selected.size} selected</>}
+              {pullSelection.length > 0 && <> · {pullSelection.length} to pull</>}
             </p>
           </>
         )

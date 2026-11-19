@@ -14,13 +14,17 @@ export interface WorkloadRow {
 export default function WorkloadTable({
   rows,
   selected,
+  pulls,
   onToggle,
   onToggleAll,
+  onTogglePull,
 }: {
   rows: WorkloadRow[]
   selected: Set<string>
+  pulls: Set<string>
   onToggle: (image: string) => void
   onToggleAll: () => void
+  onTogglePull: (image: string, tag: string) => void
 }) {
   const allSelected = rows.length > 0 && rows.every(r => selected.has(r.image.image))
   const someSelected = rows.some(r => selected.has(r.image.image))
@@ -72,7 +76,7 @@ export default function WorkloadTable({
                 <CurrentVersion image={image} />
               </td>
               <td className="px-3 py-2">
-                <AvailableVersion image={image} />
+                <AvailableVersion image={image} pulls={pulls} onTogglePull={onTogglePull} />
               </td>
               <td className="px-4 py-2">
                 <ImageStatusBadge image={image} />
